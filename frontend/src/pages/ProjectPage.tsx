@@ -1,0 +1,462 @@
+import { useEffect, useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
+import {
+  ArrowLeft, FilePlus, Trash2, FileText, Users, Copy, Check,
+  Shield, Eye, Edit3, Crown, Link, Plus, X,
+} from 'lucide-react'
+import { projectsApi, docsApi } from '../services/api'
+import { ProjectSocket } from '../services/socket'
+import { useStore, Document, Project } from '../store/useStore'
+
+interface Member {
+  user_id: string
+  username: string
+  email: string
+  role: string
+}
+
+interface Invite {
+  id: string
+  project_id: string
+  token: string
+  role: string
+  label: string
+}
+
+export default function ProjectPage() {
+  const { projectId } = useParams<{ projectId: string }>()
+  const navigate = useNavigate()
+  const { token, user, currentProject, setCurrentProject, documents, setDocuments, upsertDocument, removeDocument } = useStore()
+
+  const [members, setMembers] = useState<Member[]>([])
+  const [invites, setInvites] = useState<Invite[]>([])
+  const [loadingDocs, setLoadingDocs] = useState(true)
+  const [showMembers, setShowMembers] = useState(false)
+  const [showInvitePanel, setShowInvitePanel] = useState(false)
+  const [creatingDoc, setCreatingDoc] = useState(false)
+  const [newDocTitle, setNewDocTitle] = useState('')
+  const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [newInviteRole, setNewInviteRole] = useState<'editor' | 'viewer'>('editor')
+  const [newInviteLabel, setNewInviteLabel] = useState('')
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!projectId) return
+    projectsApi.get(projectId)
+      .then((r) => {
+        const project: Project = r.data
+        setCurrentProject(project)
+        // Auto-redirect to main.tex if there's a known first document
+        if (project.main_doc_id) {
+          navigate(`/projects/${projectId}/docs/${project.main_doc_id}`, { replace: true })
+        }
+      })
+      .catch(() => navigate('/'))
+    docsApi.list(projectId).then((r) => { setDocuments(r.data); setLoadingDocs(false) })
+    projectsApi.listMembers(projectId).then((r) => setMembers(r.data))
+  }, [projectId, navigate, setCurrentProject, setDocuments])
+
+  useEffect(() => {
+    if (!projectId || !token) return
+    const socket = new ProjectSocket(projectId, token)
+    const offs = [
+      socket.on('document_created', (msg) => {
+        const doc = msg.document as Document | undefined
+        if (doc) upsertDocument(doc)
+      }),
+      socket.on('document_updated', (msg) => {
+        const doc = msg.document as Document | undefined
+        if (doc) upsertDocument(doc)
+      }),
+      socket.on('document_deleted', (msg) => {
+        const doc = msg.document as Document | undefined
+        if (doc) removeDocument(doc.id)
+      }),
+    ]
+    socket.connect()
+    return () => {
+      offs.forEach((off) => off())
+      socket.destroy()
+    }
+  }, [projectId, token, upsertDocument, removeDocument])
+
+  // If main_doc_id wasn't available on first load, redirect once docs finish loading
+  useEffect(() => {
+    if (!loadingDocs && documents.length > 0 && projectId) {
+      const mainDoc = documents.find((d) => d.title === 'main.tex') ?? documents[0]
+      navigate(`/projects/${projectId}/docs/${mainDoc.id}`, { replace: true })
+    }
+  }, [loadingDocs])
+
+  const loadInvites = async () => {
+    if (!projectId) return
+    const r = await projectsApi.listInvites(projectId)
+    setInvites(r.data)
+  }
+
+  const openInvitePanel = () => {
+    setShowInvitePanel(true)
+    loadInvites()
+  }
+
+  const createInvite = async () => {
+    if (!projectId) return
+    if (invites.length >= 3) return
+    await projectsApi.createInvite(projectId, newInviteRole, newInviteLabel.trim())
+    setNewInviteLabel('')
+    await loadInvites()
+  }
+
+  const deleteInvite = async (inviteId: string) => {
+    if (!projectId) return
+    await projectsApi.deleteInvite(projectId, inviteId)
+    setInvites((prev) => prev.filter((i) => i.id !== inviteId))
+  }
+
+  const copyInviteLink = async (invite: Invite) => {
+    const url = `${window.location.origin}/join/${invite.token}`
+    await navigator.clipboard.writeText(url)
+    setCopiedId(invite.id)
+    setTimeout(() => setCopiedId(null), 2000)
+  }
+
+  const createDoc = async () => {
+    if (!newDocTitle.trim() || !projectId) return
+    try {
+      const r = await docsApi.create(projectId, newDocTitle.trim())
+      upsertDocument(r.data)
+      setNewDocTitle('')
+      setCreatingDoc(false)
+      navigate(`/projects/${projectId}/docs/${r.data.id}`)
+    } catch {
+      setError('Failed to create document')
+    }
+  }
+
+  const deleteDoc = async (docId: string) => {
+    if (!projectId || !confirm('Delete this document?')) return
+    await docsApi.delete(projectId, docId)
+    removeDocument(docId)
+  }
+
+  const updateRole = async (userId: string, role: string) => {
+    if (!projectId) return
+    await projectsApi.updateMemberRole(projectId, userId, role)
+    setMembers(members.map((m) => m.user_id === userId ? { ...m, role } : m))
+  }
+
+  const removeMember = async (userId: string) => {
+    if (!projectId || !confirm('Remove this member?')) return
+    await projectsApi.removeMember(projectId, userId)
+    setMembers(members.filter((m) => m.user_id !== userId))
+  }
+
+  const isOwner = currentProject?.my_role === 'owner'
+  const canEdit = currentProject?.my_role !== 'viewer'
+
+  return (
+    <div style={{ minHeight: '100vh', background: '#0f0f23', color: '#e2e8f0' }}>
+      {/* Nav */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '14px 28px', background: '#16213e', borderBottom: '1px solid #1e1e3a',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <button onClick={() => navigate('/projects')} style={ghostBtn}>
+            <ArrowLeft size={14} />
+          </button>
+          <span style={{ fontSize: 18, fontWeight: 700, color: '#c7d2fe' }}>
+            {currentProject?.title ?? '…'}
+          </span>
+          {currentProject && (
+            <span style={{
+              fontSize: 11, padding: '2px 8px', borderRadius: 10,
+              background: '#1e1e3a', color: roleColor(currentProject.my_role),
+            }}>
+              {currentProject.my_role}
+            </span>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {isOwner && (
+            <button onClick={openInvitePanel} style={ghostBtn} title="Manage invite links">
+              <Link size={14} /> Invite links
+            </button>
+          )}
+          <button
+            onClick={() => setShowMembers((v) => !v)}
+            style={{ ...ghostBtn, background: showMembers ? '#1e1e3a' : undefined }}
+          >
+            <Users size={14} /> Members ({members.length})
+          </button>
+          {canEdit && (
+            <button onClick={() => setCreatingDoc(true)} style={primaryBtn}>
+              <FilePlus size={14} /> New document
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', height: 'calc(100vh - 53px)' }}>
+        {/* Documents list */}
+        <div style={{ flex: 1, padding: '24px 28px', overflow: 'auto' }}>
+          {currentProject?.description && (
+            <p style={{ color: '#6b7280', fontSize: 13, marginBottom: 20 }}>
+              {currentProject.description}
+            </p>
+          )}
+
+          {creatingDoc && (
+            <div style={{ ...card, marginBottom: 16 }}>
+              <input
+                autoFocus
+                placeholder="Document title"
+                value={newDocTitle}
+                onChange={(e) => setNewDocTitle(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && createDoc()}
+                style={inputStyle}
+              />
+              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                <button onClick={createDoc} style={primaryBtn}>Create</button>
+                <button onClick={() => setCreatingDoc(false)} style={ghostBtn}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {error && <div style={{ color: '#fca5a5', fontSize: 13, marginBottom: 12 }}>{error}</div>}
+
+          {loadingDocs ? (
+            <div style={{ color: '#4a4a6a' }}>Loading…</div>
+          ) : documents.length === 0 ? (
+            <div style={{ color: '#4a4a6a', marginTop: 40, textAlign: 'center' }}>
+              No documents yet.{canEdit ? ' Create one to get started.' : ''}
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {documents.map((doc) => (
+                <div
+                  key={doc.id}
+                  style={{
+                    ...card, display: 'flex', alignItems: 'center',
+                    justifyContent: 'space-between', cursor: 'pointer',
+                    transition: 'border-color 0.15s',
+                  }}
+                  onClick={() => navigate(`/projects/${projectId}/docs/${doc.id}`)}
+                  onMouseEnter={(e) => (e.currentTarget.style.borderColor = '#4f46e5')}
+                  onMouseLeave={(e) => (e.currentTarget.style.borderColor = '#1e1e3a')}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <FileText size={16} color="#818cf8" />
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 14 }}>{doc.title}</div>
+                      {doc.updated_at && (
+                        <div style={{ fontSize: 11, color: '#4a4a6a', marginTop: 2 }}>
+                          Updated {new Date(doc.updated_at).toLocaleDateString()}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {canEdit && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); deleteDoc(doc.id) }}
+                      style={{ ...iconBtn, color: '#f87171' }}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Members panel */}
+        {showMembers && (
+          <div style={{
+            width: 300, borderLeft: '1px solid #1e1e3a', padding: '20px 16px',
+            background: '#12122a', overflow: 'auto',
+          }}>
+            <h3 style={{ fontSize: 14, fontWeight: 700, color: '#c7d2fe', marginBottom: 16 }}>
+              Members
+            </h3>
+            {members.map((m) => (
+              <div key={m.user_id} style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '8px 0', borderBottom: '1px solid #1e1e3a',
+              }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#e2e8f0' }}>
+                    {m.username}
+                    {m.user_id === user?.id && (
+                      <span style={{ color: '#6b7280', fontWeight: 400 }}> (you)</span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#6b7280' }}>{m.email}</div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  {isOwner && m.user_id !== user?.id ? (
+                    <select
+                      value={m.role}
+                      onChange={(e) => updateRole(m.user_id, e.target.value)}
+                      style={{
+                        background: '#1e1e3a', border: '1px solid #2a2a4a', borderRadius: 4,
+                        color: roleColor(m.role), fontSize: 11, padding: '2px 6px', cursor: 'pointer',
+                      }}
+                    >
+                      <option value="owner">owner</option>
+                      <option value="editor">editor</option>
+                      <option value="viewer">viewer</option>
+                    </select>
+                  ) : (
+                    <span style={{
+                      fontSize: 11, padding: '2px 8px', borderRadius: 10,
+                      background: '#1e1e3a', color: roleColor(m.role),
+                      display: 'flex', alignItems: 'center', gap: 4,
+                    }}>
+                      {m.role === 'owner' ? <Crown size={10} /> : m.role === 'editor' ? <Edit3 size={10} /> : <Eye size={10} />}
+                      {m.role}
+                    </span>
+                  )}
+                  {isOwner && m.user_id !== user?.id && m.role !== 'owner' && (
+                    <button onClick={() => removeMember(m.user_id)} style={{ ...iconBtn, color: '#f87171' }}>
+                      <Trash2 size={11} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Invite links modal */}
+      {showInvitePanel && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+        }} onClick={() => setShowInvitePanel(false)}>
+          <div style={{
+            background: '#16213e', border: '1px solid #2a2a4a', borderRadius: 12,
+            padding: 24, width: 440, maxWidth: '90vw',
+          }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+              <h3 style={{ fontSize: 15, fontWeight: 700, color: '#c7d2fe', margin: 0 }}>
+                Invite links
+              </h3>
+              <button onClick={() => setShowInvitePanel(false)} style={iconBtn}>
+                <X size={14} />
+              </button>
+            </div>
+
+            {/* Existing invites */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
+              {invites.length === 0 && (
+                <div style={{ color: '#4a4a6a', fontSize: 13, textAlign: 'center', padding: '12px 0' }}>
+                  No invite links yet
+                </div>
+              )}
+              {invites.map((inv) => (
+                <div key={inv.id} style={{
+                  background: '#0f0f23', border: '1px solid #1e1e3a', borderRadius: 8,
+                  padding: '10px 14px',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{
+                        fontSize: 11, padding: '2px 8px', borderRadius: 10, fontWeight: 600,
+                        background: inv.role === 'editor' ? '#1a2a1a' : '#1a1a2a',
+                        color: inv.role === 'editor' ? '#4ade80' : '#9ca3af',
+                      }}>
+                        {inv.role}
+                      </span>
+                      {inv.label && (
+                        <span style={{ fontSize: 12, color: '#9ca3af' }}>{inv.label}</span>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button onClick={() => copyInviteLink(inv)} style={iconBtn} title="Copy link">
+                        {copiedId === inv.id ? <Check size={13} color="#4ade80" /> : <Copy size={13} />}
+                      </button>
+                      <button onClick={() => deleteInvite(inv.id)} style={{ ...iconBtn, color: '#f87171' }} title="Delete">
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  </div>
+                  <div style={{
+                    fontSize: 11, color: '#4a4a6a', fontFamily: 'monospace',
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>
+                    {window.location.origin}/join/{inv.token}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Create new invite */}
+            {invites.length < 3 ? (
+              <div style={{ borderTop: '1px solid #1e1e3a', paddingTop: 16 }}>
+                <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 10 }}>
+                  New invite link ({invites.length}/3)
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                  <select
+                    value={newInviteRole}
+                    onChange={(e) => setNewInviteRole(e.target.value as 'editor' | 'viewer')}
+                    style={{
+                      background: '#0f0f23', border: '1px solid #2a2a4a', borderRadius: 6,
+                      color: '#e2e8f0', fontSize: 13, padding: '6px 10px', cursor: 'pointer',
+                    }}
+                  >
+                    <option value="editor">editor</option>
+                    <option value="viewer">viewer</option>
+                  </select>
+                  <input
+                    placeholder="Label (optional)"
+                    value={newInviteLabel}
+                    onChange={(e) => setNewInviteLabel(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && createInvite()}
+                    style={{ ...inputStyle, flex: 1 }}
+                  />
+                </div>
+                <button onClick={createInvite} style={{ ...primaryBtn, width: '100%', justifyContent: 'center' }}>
+                  <Plus size={14} /> Create link
+                </button>
+              </div>
+            ) : (
+              <div style={{ borderTop: '1px solid #1e1e3a', paddingTop: 16, textAlign: 'center', color: '#6b7280', fontSize: 13 }}>
+                Maximum 3 invite links reached
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function roleColor(role: string) {
+  return role === 'owner' ? '#fbbf24' : role === 'editor' ? '#4ade80' : '#9ca3af'
+}
+
+const card: React.CSSProperties = {
+  background: '#16213e', border: '1px solid #1e1e3a', borderRadius: 10, padding: '14px 18px',
+}
+const inputStyle: React.CSSProperties = {
+  width: '100%', background: '#0f0f23', border: '1px solid #2a2a4a', borderRadius: 6,
+  padding: '8px 12px', color: '#e2e8f0', fontSize: 13, outline: 'none', boxSizing: 'border-box',
+}
+const primaryBtn: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px',
+  borderRadius: 6, border: 'none', background: '#4f46e5', color: '#fff',
+  fontSize: 13, cursor: 'pointer', fontWeight: 600,
+}
+const ghostBtn: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px',
+  borderRadius: 6, border: '1px solid #2a2a4a', background: 'transparent',
+  color: '#9ca3af', fontSize: 13, cursor: 'pointer',
+}
+const iconBtn: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', justifyContent: 'center',
+  width: 26, height: 26, borderRadius: 5, border: '1px solid #2a2a4a',
+  background: 'transparent', color: '#9ca3af', cursor: 'pointer',
+}

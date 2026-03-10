@@ -1,0 +1,119 @@
+import { create } from 'zustand'
+
+export interface User {
+  id: string
+  email: string
+  username: string
+}
+
+export interface Project {
+  id: string
+  title: string
+  description: string
+  owner_id: string
+  my_role: 'owner' | 'editor' | 'viewer'
+  main_doc_id?: string | null
+}
+
+export interface Document {
+  id: string
+  title: string
+  content?: string
+  owner_id: string
+  project_id: string
+  updated_at?: string
+  compile_success?: boolean | null
+  compile_pdf_base64?: string | null
+  compile_log?: string | null
+}
+
+export interface Presence {
+  user_id: string
+  username: string
+  color: string
+  read_only?: boolean
+}
+
+interface AppState {
+  user: User | null
+  token: string | null
+  projects: Project[]
+  currentProject: Project | null
+  documents: Document[]
+  currentDoc: Document | null
+  presence: Presence[]
+  isConnected: boolean
+  compiledPdf: string | null
+  compileLog: string
+  isCompiling: boolean
+
+  setUser: (user: User | null, token: string | null) => void
+  setProjects: (projects: Project[]) => void
+  setCurrentProject: (p: Project | null) => void
+  setDocuments: (docs: Document[]) => void
+  upsertDocument: (doc: Document) => void
+  removeDocument: (docId: string) => void
+  setCurrentDoc: (doc: Document | null) => void
+  updateDocContent: (content: string) => void
+  updateDocTitle: (title: string) => void
+  setPresence: (presence: Presence[]) => void
+  setConnected: (v: boolean) => void
+  setCompiledPdf: (pdf: string | null, log: string) => void
+  setCompiling: (v: boolean) => void
+  logout: () => void
+}
+
+export const useStore = create<AppState>((set) => ({
+  user: (() => {
+    try { return JSON.parse(localStorage.getItem('user') || 'null') } catch { return null }
+  })(),
+  token: localStorage.getItem('token'),
+  projects: [],
+  currentProject: null,
+  documents: [],
+  currentDoc: null,
+  presence: [],
+  isConnected: false,
+  compiledPdf: null,
+  compileLog: '',
+  isCompiling: false,
+
+  setUser: (user, token) => {
+    if (user && token) {
+      localStorage.setItem('user', JSON.stringify(user))
+      localStorage.setItem('token', token)
+    }
+    set({ user, token })
+  },
+  setProjects: (projects) => set({ projects }),
+  setCurrentProject: (currentProject) => set({ currentProject }),
+  setDocuments: (documents) => set({ documents }),
+  upsertDocument: (doc) => set((s) => {
+    const existing = s.documents.find((d) => d.id === doc.id)
+    const documents = existing
+      ? s.documents.map((d) => d.id === doc.id ? { ...d, ...doc } : d)
+      : [doc, ...s.documents]
+    return {
+      documents,
+      currentDoc: s.currentDoc?.id === doc.id ? { ...s.currentDoc, ...doc } : s.currentDoc,
+    }
+  }),
+  removeDocument: (docId) => set((s) => ({
+    documents: s.documents.filter((d) => d.id !== docId),
+    currentDoc: s.currentDoc?.id === docId ? null : s.currentDoc,
+  })),
+  setCurrentDoc: (currentDoc) => set({ currentDoc }),
+  updateDocContent: (content) =>
+    set((s) => s.currentDoc ? { currentDoc: { ...s.currentDoc, content } } : {}),
+  updateDocTitle: (title) =>
+    set((s) => s.currentDoc ? { currentDoc: { ...s.currentDoc, title } } : {}),
+  setPresence: (presence) => set({ presence }),
+  setConnected: (isConnected) => set({ isConnected }),
+  setCompiledPdf: (compiledPdf, compileLog) => set({ compiledPdf, compileLog }),
+  setCompiling: (isCompiling) => set({ isCompiling }),
+  logout: () => {
+    localStorage.removeItem('token')
+    localStorage.removeItem('user')
+    set({ user: null, token: null, projects: [], currentProject: null, documents: [], currentDoc: null })
+  },
+}))
