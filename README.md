@@ -4,7 +4,9 @@
 
 ## Lambda Editor
 
-Full-stack collaborative LaTeX workspace built for drafting technical documents with less friction.
+This is Lambda. My team's project for AI1220.
+
+It's collaborative LaTeX workspace built for drafting technical documents with less friction.
 
 > **Best for:** academic writing, research notes, technical reports, and collaborative document workflows.
 
