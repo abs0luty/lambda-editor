@@ -4,9 +4,9 @@
 
 ## Lambda Editor
 
-This is Lambda. My team's project for AI1220.
+This is Lambda. My team's project for AI1220: a remake of Overleaf with AI features.
 
-It's collaborative LaTeX workspace built for drafting technical documents with less friction.
+It's collaborative LaTeX workspace built for drafting technical documents with less friction. 
 
 > **Best for:** academic writing, research notes, technical reports, and collaborative document workflows.
 
