@@ -54,7 +54,6 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-psql -U postgres -d lambda_editor -f scripts/postgres_schema.sql # initialize db schema
 ```
 
 Update `backend/.env` with your values:
@@ -92,11 +91,6 @@ cd frontend
 npm install
 npm run dev
 ```
-
-The Vite dev server runs on `http://localhost:5173` and proxies:
-
-- `/api` → `http://localhost:8000`
-- `/ws` → `ws://localhost:8000`
 
 ### 3. One-command startup
 
