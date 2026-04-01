@@ -31,7 +31,7 @@ export interface EquationLocation {
 
 export type ActionRequest =
   | { type: 'equation'; description: string; location: EquationLocation }
-  | { type: 'translate'; language: string }
+  | { type: 'translate'; language: string; text: string }
   | { type: 'suggest'; instruction: string }
   | { type: 'simplify' | 'summarize'; text: string }
 

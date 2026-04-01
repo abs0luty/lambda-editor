@@ -34,7 +34,7 @@ export const ACTION_DEFS: Record<ActionType, Omit<ActiveAction, 'type'>> = {
   },
 }
 
-export const AVAILABLE_ACTIONS: ActionType[] = ['suggest', 'equation']
+export const AVAILABLE_ACTIONS: ActionType[] = ['suggest', 'translate', 'equation']
 
 export const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`
 

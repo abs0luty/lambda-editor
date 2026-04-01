@@ -4,6 +4,12 @@ export interface TextOp {
   new: string
 }
 
+interface PendingDraft {
+  content: string
+  baseRevision: number
+  timestamp: number
+}
+
 type MessageHandler = (msg: Record<string, unknown>) => void
 
 export class RoomSocket {
@@ -12,6 +18,8 @@ export class RoomSocket {
   private pingInterval: ReturnType<typeof setInterval> | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private destroyed = false
+  private reconnectDelayMs = 1000
+  private pendingDraft: PendingDraft | null = null
 
   constructor(
     private roomId: string,
@@ -25,6 +33,7 @@ export class RoomSocket {
     this.ws = new WebSocket(url)
 
     this.ws.onopen = () => {
+      this.reconnectDelayMs = 1000
       this.emit('connected', {})
       this.pingInterval = setInterval(() => this.send({ type: 'ping' }), 20000)
     }
@@ -43,7 +52,10 @@ export class RoomSocket {
       if (this.pingInterval) clearInterval(this.pingInterval)
       this.pingInterval = null
       if (!this.destroyed) {
-        this.reconnectTimer = setTimeout(() => this.connect(), 3000)
+        const nextDelay = this.reconnectDelayMs
+        this.emit('reconnecting', { delay_ms: nextDelay })
+        this.reconnectTimer = setTimeout(() => this.connect(), nextDelay)
+        this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, 30000)
       }
     }
 
@@ -78,6 +90,10 @@ export class RoomSocket {
     this.send({ type: 'update', content })
   }
 
+  sendRevisionedUpdate(content: string, baseRevision: number) {
+    this.send({ type: 'update', content, base_revision: baseRevision })
+  }
+
   sendCursor(position: { lineNumber: number; column: number }, selection?: unknown) {
     this.send({ type: 'cursor', position, selection })
   }
@@ -88,8 +104,8 @@ export class RoomSocket {
 
   // Broadcast targeted text replacements instead of the whole document so
   // concurrent edits in other parts of the document survive unaffected.
-  sendOp(ops: TextOp[]) {
-    this.send({ type: 'op', ops })
+  sendOp(ops: TextOp[], baseRevision: number, localContent: string) {
+    this.send({ type: 'op', ops, base_revision: baseRevision, local_content: localContent })
   }
 
   sendAiChat(data: Record<string, unknown>) {
@@ -109,6 +125,22 @@ export class RoomSocket {
     this.ws?.close()
     this.ws = null
     this.handlers.clear()
+  }
+
+  isOpen() {
+    return this.ws?.readyState === WebSocket.OPEN
+  }
+
+  setPendingDraft(draft: PendingDraft | null) {
+    this.pendingDraft = draft
+  }
+
+  getPendingDraft() {
+    return this.pendingDraft
+  }
+
+  clearPendingDraft() {
+    this.pendingDraft = null
   }
 }
 

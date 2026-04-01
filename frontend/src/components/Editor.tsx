@@ -17,11 +17,12 @@ interface Props {
   socket: RoomSocket | null
   readOnly?: boolean
   remoteDecorations: Map<string, RemoteCursor>
-  onRegisterOpApplier: (fn: (ops: TextOp[]) => void) => void
+  onRegisterOpApplier: (fn: (ops: TextOp[]) => boolean) => void
   onRegisterTextInserter?: (fn: (text: string) => void) => void
   onRegisterGetCursorPos?: (fn: () => { lineNumber: number; column: number } | null) => void
   onCursorMove?: (pos: { lineNumber: number; column: number }) => void
   onSelectionQuote?: (quote: { lineStart: number; lineEnd: number; text: string }) => void
+  onLocalDocumentChange?: (content: string) => void
   pickingLocation?: boolean
   onLocationPicked?: (loc: { line: number; text: string; beforeText: string; afterText: string }) => void
   ownUsername?: string
@@ -46,7 +47,7 @@ const LATEX_SNIPPETS = [
   { label: '\\int', insertText: '\\int_{$1}^{$2}' },
 ]
 
-export default function Editor({ socket, readOnly, remoteDecorations, onRegisterOpApplier, onRegisterTextInserter, onRegisterGetCursorPos, onCursorMove, onSelectionQuote, pickingLocation, onLocationPicked, ownUsername, ownColor }: Props) {
+export default function Editor({ socket, readOnly, remoteDecorations, onRegisterOpApplier, onRegisterTextInserter, onRegisterGetCursorPos, onCursorMove, onSelectionQuote, onLocalDocumentChange, pickingLocation, onLocationPicked, ownUsername, ownColor }: Props) {
   const { currentDoc, updateDocContent } = useStore()
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<typeof Monaco | null>(null)
@@ -65,16 +66,20 @@ export default function Editor({ socket, readOnly, remoteDecorations, onRegister
   const applyOps = useCallback((ops: TextOp[]) => {
     const editor = editorRef.current
     const monaco = monacoRef.current
-    if (!editor || !monaco) return
+    if (!editor || !monaco) return false
     const model = editor.getModel()
-    if (!model) return
+    if (!model) return false
 
     isRemoteUpdate.current = true
+    let appliedAll = true
     for (const op of ops) {
       if (op.kind !== 'replace') continue
       const content = model.getValue()
       const idx = content.indexOf(op.old)
-      if (idx === -1) continue
+      if (idx === -1) {
+        appliedAll = false
+        continue
+      }
       const startPos = model.getPositionAt(idx)
       const endPos = model.getPositionAt(idx + op.old.length)
       editor.executeEdits('remote-op', [{
@@ -84,6 +89,7 @@ export default function Editor({ socket, readOnly, remoteDecorations, onRegister
     }
     isRemoteUpdate.current = false
     updateDocContent(model.getValue())
+    return appliedAll
   }, [updateDocContent])
 
   const handleMount: OnMount = (editor, monaco) => {
@@ -281,9 +287,9 @@ export default function Editor({ socket, readOnly, remoteDecorations, onRegister
       if (isRemoteUpdate.current) return
       const content = value ?? ''
       updateDocContent(content)
-      socketRef.current?.sendUpdate(content)
+      onLocalDocumentChange?.(content)
     },
-    [updateDocContent]
+    [onLocalDocumentChange, updateDocContent]
   )
 
   const handleQuote = () => {

@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS documents (
     content TEXT NOT NULL,
     project_id VARCHAR NOT NULL REFERENCES projects (id),
     owner_id VARCHAR NOT NULL REFERENCES users (id),
+    content_revision INTEGER NOT NULL DEFAULT 0,
     compile_success BOOLEAN,
     compile_pdf_base64 TEXT,
     compile_log TEXT,
@@ -55,6 +56,7 @@ CREATE TABLE IF NOT EXISTS documents (
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS compile_success BOOLEAN;
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS compile_pdf_base64 TEXT;
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS compile_log TEXT;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS content_revision INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS document_versions (
     id VARCHAR PRIMARY KEY,
@@ -80,14 +82,6 @@ CREATE TABLE IF NOT EXISTS ai_chat_messages (
     rejected_json TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-
-ALTER TABLE ai_chat_messages ADD COLUMN IF NOT EXISTS action_type VARCHAR;
-ALTER TABLE ai_chat_messages ADD COLUMN IF NOT EXISTS action_prompt TEXT;
-ALTER TABLE ai_chat_messages ADD COLUMN IF NOT EXISTS quotes_json TEXT;
-ALTER TABLE ai_chat_messages ADD COLUMN IF NOT EXISTS diff_json TEXT;
-ALTER TABLE ai_chat_messages ADD COLUMN IF NOT EXISTS retry_action_json TEXT;
-ALTER TABLE ai_chat_messages ADD COLUMN IF NOT EXISTS accepted_json TEXT;
-ALTER TABLE ai_chat_messages ADD COLUMN IF NOT EXISTS rejected_json TEXT;
 
 CREATE INDEX IF NOT EXISTS ix_ai_chat_messages_document_id ON ai_chat_messages (document_id);
 

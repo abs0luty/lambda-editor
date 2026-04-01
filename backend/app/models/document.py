@@ -14,6 +14,7 @@ class Document(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
     project_id: Mapped[str] = mapped_column(String, ForeignKey("projects.id"), nullable=False)
     owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), nullable=False)
+    content_revision: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
     compile_success: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     compile_pdf_base64: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     compile_log: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

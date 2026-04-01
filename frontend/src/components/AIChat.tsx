@@ -27,6 +27,8 @@ export default function AIChat({
   onCancelEquationLocation,
   currentDocTitle,
 }: Props) {
+  const selectedTextFromQuotes = (items: QuoteItem[]) => items[items.length - 1]?.text?.trim() || ''
+  const disclosureKey = 'ai-disclosure-accepted:v1'
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -34,6 +36,7 @@ export default function AIChat({
   const [equationLocation, setEquationLocation] = useState<EquationLocation | null>(null)
   const [retryAction, setRetryAction] = useState<ActionRequest | null>(null)
   const [quotes, setQuotes] = useState<QuoteItem[]>([])
+  const [aiDisclosureAccepted, setAiDisclosureAccepted] = useState<boolean>(() => sessionStorage.getItem(disclosureKey) === 'true')
   const [accepted, setAccepted] = useState<Map<string, Set<string>>>(new Map())
   const [rejected, setRejected] = useState<Map<string, Set<string>>>(new Map())
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -44,6 +47,7 @@ export default function AIChat({
   const { currentDoc, updateDocContent, user } = useStore()
   const effectiveEquationLocation = equationLocation ?? pendingEquationLocation ?? null
   const canReviewDiffs = !readOnly
+  const canInvokeAI = !readOnly
 
   // Keep a stable ref to socket so callbacks don't go stale
   const socketRef = useRef<RoomSocket | null>(null)
@@ -241,7 +245,7 @@ export default function AIChat({
   // ── Action handlers ──────────────────────────────────────────────────────────
 
   const sendMessage = async () => {
-    if (loading) return
+    if (loading || !canInvokeAI || !aiDisclosureAccepted) return
     if (activeAction) { await submitAction(); return }
     if (retryAction) { await submitRetryAction(); return }
     const text = input.trim()
@@ -292,6 +296,7 @@ export default function AIChat({
       } else if (request.type === 'translate') {
         res = await api.post('/ai/translate-diff', {
           language: request.language,
+          text: request.text,
           document_content: currentDoc?.content || '',
           variation_request: variationRequest,
           project_id: currentDoc?.project_id,
@@ -336,9 +341,10 @@ export default function AIChat({
   }
 
   const submitAction = async () => {
-    if (!activeAction || loading) return
+    if (!activeAction || loading || !canInvokeAI || !aiDisclosureAccepted) return
     const val = input.trim()
     const loc = effectiveEquationLocation
+    const selectedText = selectedTextFromQuotes(quotes)
     if (activeAction.type === 'equation') {
       if (!val) return
       if (!loc) {
@@ -346,7 +352,7 @@ export default function AIChat({
         onRequestEquationLocation?.()
         return
       }
-    } else if (activeAction.type === 'translate' && !val) {
+    } else if (activeAction.type === 'translate' && (!val || !selectedText)) {
       return
     } else if ((activeAction.type === 'simplify' || activeAction.type === 'summarize') && !val && !(currentDoc?.content?.slice(-3000))) {
       return
@@ -381,7 +387,7 @@ export default function AIChat({
     const request: ActionRequest = activeAction.type === 'equation'
       ? { type: 'equation', description: val, location: loc! }
       : activeAction.type === 'translate'
-        ? { type: 'translate', language: val }
+        ? { type: 'translate', language: val, text: selectedText }
         : activeAction.type === 'suggest'
           ? { type: 'suggest', instruction: val || 'Suggest improvements for this LaTeX document' }
           : { type: activeAction.type, text: val || currentDoc?.content?.slice(-3000) || '' }
@@ -390,7 +396,7 @@ export default function AIChat({
   }
 
   const submitRetryAction = async () => {
-    if (!retryAction || loading) return
+    if (!retryAction || loading || !aiDisclosureAccepted) return
     const variationRequest = input.trim()
     const currentQuotes = [...quotes]
     setInput('')
@@ -413,8 +419,13 @@ export default function AIChat({
 
   const applyChange = useCallback((change: DiffChange) => {
     if (!currentDoc?.content) return
-    updateDocContent(currentDoc.content.replace(change.old_text, change.new_text))
-    socketRef.current?.sendOp([{ kind: 'replace', old: change.old_text, new: change.new_text }])
+    const nextContent = currentDoc.content.replace(change.old_text, change.new_text)
+    updateDocContent(nextContent)
+    socketRef.current?.sendOp(
+      [{ kind: 'replace', old: change.old_text, new: change.new_text }],
+      currentDoc.content_revision ?? 0,
+      nextContent,
+    )
   }, [currentDoc, updateDocContent])
 
   const persistReviewState = useCallback((messageId: string, nextAccepted: Set<string>, nextRejected: Set<string>) => {
@@ -472,14 +483,23 @@ export default function AIChat({
   }, [accepted, canReviewDiffs, persistReviewState])
 
   const handleAcceptAll = useCallback((id: string, changes: DiffChange[]) => {
-    if (!canReviewDiffs) return
-    changes.forEach(applyChange)
+    if (!canReviewDiffs || !currentDoc?.content) return
+    let nextContent = currentDoc.content
+    changes.forEach((change) => {
+      nextContent = nextContent.replace(change.old_text, change.new_text)
+    })
+    updateDocContent(nextContent)
+    socketRef.current?.sendOp(
+      changes.map((change) => ({ kind: 'replace' as const, old: change.old_text, new: change.new_text })),
+      currentDoc.content_revision ?? 0,
+      nextContent,
+    )
     const nextAccepted = new Set(changes.map((c) => c.id))
     const nextRejected = new Set<string>()
     setAccepted((prev) => { const m = new Map(prev); m.set(id, nextAccepted); return m })
     setRejected((prev) => { const m = new Map(prev); m.delete(id); return m })
     persistReviewState(id, nextAccepted, nextRejected)
-  }, [applyChange, canReviewDiffs, persistReviewState])
+  }, [canReviewDiffs, currentDoc, persistReviewState, updateDocContent])
 
   const handleRejectAll = useCallback((id: string, changes: DiffChange[]) => {
     if (!canReviewDiffs) return
@@ -515,15 +535,16 @@ export default function AIChat({
           return (
             <button
               key={type}
-              onClick={() => !loading && activateAction(type)}
+              onClick={() => !loading && canInvokeAI && activateAction(type)}
               style={{
                 ...chip,
                 color: def.color,
                 borderColor: active ? def.color : '#2a2a4a',
                 background: active ? `${def.color}18` : 'transparent',
-                opacity: loading ? 0.4 : 1,
-                cursor: loading ? 'default' : 'pointer',
+                opacity: loading || !canInvokeAI ? 0.4 : 1,
+                cursor: loading || !canInvokeAI ? 'default' : 'pointer',
               }}
+              disabled={loading || !canInvokeAI}
             >
               {def.icon} {def.label}
             </button>
@@ -533,9 +554,28 @@ export default function AIChat({
 
       {/* Messages */}
       <div style={{ flex: 1, overflow: 'auto', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {!aiDisclosureAccepted && canInvokeAI && (
+          <div style={{
+            background: '#1f2a44', border: '1px solid #2f4f7f', borderRadius: 10,
+            padding: 12, color: '#dbeafe', fontSize: 12, lineHeight: 1.6,
+          }}>
+            Selected document content may be sent to a third-party AI provider. By continuing, you confirm that AI requests should use only the selected content and necessary context unless you explicitly request broader scope.
+            <div style={{ marginTop: 10, display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => {
+                  sessionStorage.setItem(disclosureKey, 'true')
+                  setAiDisclosureAccepted(true)
+                }}
+                style={{ background: '#60a5fa', color: '#0f172a', border: 'none', borderRadius: 6, padding: '6px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}
+              >
+                I Understand
+              </button>
+            </div>
+          </div>
+        )}
         {messages.length === 0 && (
           <div style={{ color: '#3a3a6a', fontSize: 12, textAlign: 'center', marginTop: 48, lineHeight: 1.8 }}>
-            Ask anything or pick an action above.
+            {canInvokeAI ? 'Ask anything or pick an action above.' : 'AI actions are unavailable in viewer mode.'}
           </div>
         )}
         {messages.map((m) => {
@@ -747,6 +787,13 @@ export default function AIChat({
                   )}
                 </div>
               )}
+              {activeAction.type === 'translate' && (
+                <div style={{ padding: '0 10px 6px', fontSize: 11, color: selectedTextFromQuotes(quotes) ? '#86efac' : '#fca5a5' }}>
+                  {selectedTextFromQuotes(quotes)
+                    ? 'Selected passage ready. Enter the target language.'
+                    : 'Quote a passage from the editor first, then enter the target language.'}
+                </div>
+              )}
             </div>
           )}
           <textarea
@@ -762,8 +809,14 @@ export default function AIChat({
                 onCancelEquationLocation?.()
               }
             }}
-            placeholder={retryAction ? 'How should it be different? Leave empty for another alternative' : activeAction?.placeholder ?? 'Message…'}
-            disabled={loading}
+            placeholder={
+              !canInvokeAI
+                ? 'AI actions require editor access'
+                : retryAction
+                  ? 'How should it be different? Leave empty for another alternative'
+                  : activeAction?.placeholder ?? 'Message…'
+            }
+            disabled={loading || !canInvokeAI || !aiDisclosureAccepted}
             rows={2}
             style={textareaStyle}
           />

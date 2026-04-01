@@ -21,6 +21,7 @@ export interface Document {
   content?: string
   owner_id: string
   project_id: string
+  content_revision?: number
   updated_at?: string
   compile_success?: boolean | null
   compile_pdf_base64?: string | null
@@ -55,6 +56,7 @@ interface AppState {
   removeDocument: (docId: string) => void
   setCurrentDoc: (doc: Document | null) => void
   updateDocContent: (content: string) => void
+  updateDocSyncState: (data: { content?: string; title?: string; content_revision?: number; updated_at?: string }) => void
   updateDocTitle: (title: string) => void
   setPresence: (presence: Presence[]) => void
   setConnected: (v: boolean) => void
@@ -105,6 +107,8 @@ export const useStore = create<AppState>((set) => ({
   setCurrentDoc: (currentDoc) => set({ currentDoc }),
   updateDocContent: (content) =>
     set((s) => s.currentDoc ? { currentDoc: { ...s.currentDoc, content } } : {}),
+  updateDocSyncState: (data) =>
+    set((s) => s.currentDoc ? { currentDoc: { ...s.currentDoc, ...data } } : {}),
   updateDocTitle: (title) =>
     set((s) => s.currentDoc ? { currentDoc: { ...s.currentDoc, title } } : {}),
   setPresence: (presence) => set({ presence }),

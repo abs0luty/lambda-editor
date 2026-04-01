@@ -44,6 +44,7 @@ async def handle_room(
     await room.send_to(user_id, {
         "type": "init",
         "content": doc.content,
+        "revision": doc.content_revision,
         "presence": await room.presence_list(),
         "read_only": read_only,
         "cursors": await room.cursor_snapshot(exclude=user_id),
@@ -52,6 +53,15 @@ async def handle_room(
         {"type": "presence", "presence": await room.presence_list()},
         exclude=user_id,
     )
+
+    def _reconcile_payload(reason: str, local_content: str):
+        return {
+            "type": "reconcile",
+            "reason": reason,
+            "server_content": doc.content,
+            "server_revision": doc.content_revision,
+            "local_content": local_content,
+        }
 
     try:
         while True:
@@ -67,10 +77,25 @@ async def handle_room(
                 if read_only:
                     continue
                 content = msg.get("content", "")
+                base_revision = int(msg.get("base_revision", -1))
+                if base_revision != doc.content_revision:
+                    await room.send_to(user_id, _reconcile_payload("revision_conflict", content))
+                    continue
                 doc.content = content
+                doc.content_revision += 1
                 await db.commit()
+                await room.send_to(user_id, {
+                    "type": "ack",
+                    "content": doc.content,
+                    "revision": doc.content_revision,
+                })
                 await room.broadcast(
-                    {"type": "update", "content": content, "user_id": user_id},
+                    {
+                        "type": "update",
+                        "content": content,
+                        "revision": doc.content_revision,
+                        "user_id": user_id,
+                    },
                     exclude=user_id,
                 )
 
@@ -79,15 +104,40 @@ async def handle_room(
                 # multiple clients edit concurrently (AI changes, parallel typing).
                 if read_only:
                     continue
+                base_revision = int(msg.get("base_revision", -1))
+                if base_revision != doc.content_revision:
+                    await room.send_to(user_id, _reconcile_payload("revision_conflict", msg.get("local_content", doc.content)))
+                    continue
                 ops = msg.get("ops", [])
+                next_content = doc.content
+                failed = False
                 for op in ops:
                     if op.get("kind") == "replace":
                         old_text = op.get("old", "")
                         new_text = op.get("new", "")
-                        doc.content = doc.content.replace(old_text, new_text, 1)
+                        if old_text not in next_content:
+                            failed = True
+                            break
+                        next_content = next_content.replace(old_text, new_text, 1)
+                if failed:
+                    await room.send_to(user_id, _reconcile_payload("apply_failed", msg.get("local_content", next_content)))
+                    continue
+                doc.content = next_content
+                doc.content_revision += 1
                 await db.commit()
+                await room.send_to(user_id, {
+                    "type": "ack",
+                    "content": doc.content,
+                    "revision": doc.content_revision,
+                })
                 await room.broadcast(
-                    {"type": "op", "ops": ops, "user_id": user_id},
+                    {
+                        "type": "op",
+                        "ops": ops,
+                        "content": doc.content,
+                        "revision": doc.content_revision,
+                        "user_id": user_id,
+                    },
                     exclude=user_id,
                 )
 
@@ -106,6 +156,8 @@ async def handle_room(
                 )
 
             elif msg_type == "ai_chat":
+                if read_only:
+                    continue
                 if msg.get("event") == "user_msg":
                     action_id = msg.get("action_id")
                     if action_id:

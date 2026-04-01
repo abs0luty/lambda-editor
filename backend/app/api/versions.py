@@ -13,6 +13,7 @@ from app.models.version import DocumentVersion
 from app.models.user import User
 from app.api.auth import get_current_user
 from app.api.projects import _require_project
+from app.websocket.manager import manager
 
 router = APIRouter(
     prefix="/projects/{project_id}/documents/{doc_id}/versions",
@@ -161,7 +162,19 @@ async def restore_version(
     db.add(snapshot)
 
     doc.content = ver.content
+    doc.content_revision += 1
     await db.commit()
+
+    await manager.broadcast_to_room(
+        doc_id,
+        {
+            "type": "update",
+            "content": doc.content,
+            "revision": doc.content_revision,
+            "restored_from_version_id": ver.id,
+            "user_id": current_user.id,
+        },
+    )
 
     return VersionDetail(
         id=ver.id, document_id=ver.document_id, label=ver.label, content=ver.content,

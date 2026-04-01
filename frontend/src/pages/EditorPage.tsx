@@ -18,20 +18,29 @@ interface RemoteCursor {
   selection?: { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number }
 }
 
+interface ReconcileState {
+  reason: string
+  serverContent: string
+  serverRevision: number
+  localContent: string
+}
+
 export default function EditorPage() {
   const { projectId, docId } = useParams<{ projectId: string; docId: string }>()
   const navigate = useNavigate()
   const {
     token, currentDoc, currentProject,
     setCurrentDoc, setPresence, setConnected,
-    updateDocContent, updateDocTitle, setCompiledPdf,
+    updateDocContent, updateDocSyncState, updateDocTitle, setCompiledPdf,
+    isConnected,
     user,
   } = useStore()
 
   const socketRef = useRef<RoomSocket | null>(null)
-  const opApplierRef = useRef<((ops: TextOp[]) => void) | null>(null)
+  const opApplierRef = useRef<((ops: TextOp[]) => boolean) | null>(null)
   const textInserterRef = useRef<((text: string) => void) | null>(null)
   const getCursorPosRef = useRef<(() => { lineNumber: number; column: number } | null) | null>(null)
+  const currentDocRef = useRef(currentDoc)
 
   const [showAI, setShowAI] = useState(true)
   const [showPreview, setShowPreview] = useState(true)
@@ -44,6 +53,26 @@ export default function EditorPage() {
   const [quoteForChat, setQuoteForChat] = useState<{ lineStart: number; lineEnd: number; text: string } | null>(null)
   const [pickingEquationLocation, setPickingEquationLocation] = useState(false)
   const [equationLocation, setEquationLocation] = useState<{ line: number; text: string; beforeText: string; afterText: string } | null>(null)
+  const [reconnectingDelayMs, setReconnectingDelayMs] = useState<number | null>(null)
+  const [reconcileState, setReconcileState] = useState<ReconcileState | null>(null)
+
+  useEffect(() => {
+    currentDocRef.current = currentDoc
+  }, [currentDoc])
+
+  const handleLocalDocumentChange = useCallback((content: string) => {
+    const socket = socketRef.current
+    const baseRevision = currentDocRef.current?.content_revision ?? 0
+    if (socket?.isOpen()) {
+      socket.sendRevisionedUpdate(content, baseRevision)
+      return
+    }
+    socket?.setPendingDraft({
+      content,
+      baseRevision,
+      timestamp: Date.now(),
+    })
+  }, [])
 
   useEffect(() => {
     if (!projectId || !docId) return
@@ -63,12 +92,33 @@ export default function EditorPage() {
     socketRef.current = socket
 
     const offs = [
-      socket.on('connected', () => setConnected(true)),
+      socket.on('connected', () => {
+        setConnected(true)
+        setReconnectingDelayMs(null)
+      }),
       socket.on('disconnected', () => setConnected(false)),
+      socket.on('reconnecting', (msg: any) => setReconnectingDelayMs(msg.delay_ms as number)),
       socket.on('init', (msg: any) => {
-        updateDocContent(msg.content)
+        updateDocSyncState({ content: msg.content, content_revision: msg.revision })
         setPresence(msg.presence as Presence[])
         setReadOnly(!!msg.read_only)
+        const pendingDraft = socket.getPendingDraft()
+        if (pendingDraft && Date.now() - pendingDraft.timestamp <= 5 * 60 * 1000) {
+          if ((msg.revision as number) === pendingDraft.baseRevision) {
+            updateDocContent(pendingDraft.content)
+            socket.sendRevisionedUpdate(pendingDraft.content, msg.revision as number)
+          } else {
+            socket.clearPendingDraft()
+            setReconcileState({
+              reason: 'offline-conflict',
+              serverContent: msg.content as string,
+              serverRevision: msg.revision as number,
+              localContent: pendingDraft.content,
+            })
+          }
+        } else {
+          socket.clearPendingDraft()
+        }
         // Restore last known cursor positions for all currently connected users
         if (msg.cursors) {
           const restored = new Map<string, RemoteCursor>()
@@ -83,9 +133,30 @@ export default function EditorPage() {
           setRemoteDecorations(restored)
         }
       }),
-      socket.on('update', (msg: any) => updateDocContent(msg.content)),
+      socket.on('ack', (msg: any) => {
+        socket.clearPendingDraft()
+        updateDocSyncState({ content: msg.content, content_revision: msg.revision })
+      }),
+      socket.on('update', (msg: any) => {
+        socket.clearPendingDraft()
+        updateDocSyncState({ content: msg.content, content_revision: msg.revision })
+      }),
       socket.on('op', (msg: any) => {
-        opApplierRef.current?.(msg.ops as TextOp[])
+        const applied = opApplierRef.current?.(msg.ops as TextOp[]) ?? false
+        if (!applied) {
+          updateDocContent(msg.content as string)
+        }
+        updateDocSyncState({ content: msg.content as string, content_revision: msg.revision as number })
+      }),
+      socket.on('reconcile', (msg: any) => {
+        socket.clearPendingDraft()
+        updateDocSyncState({ content: msg.server_content as string, content_revision: msg.server_revision as number })
+        setReconcileState({
+          reason: msg.reason as string,
+          serverContent: msg.server_content as string,
+          serverRevision: msg.server_revision as number,
+          localContent: msg.local_content as string,
+        })
       }),
       socket.on('presence', (msg: any) => setPresence(msg.presence as Presence[])),
       socket.on('title', (msg: any) => updateDocTitle(msg.title)),
@@ -116,7 +187,7 @@ export default function EditorPage() {
       setConnected(false)
       socketRef.current = null
     }
-  }, [docId, token, setConnected, setPresence, updateDocContent, updateDocTitle, setCompiledPdf])
+  }, [docId, token, setConnected, setPresence, updateDocContent, updateDocSyncState, updateDocTitle, setCompiledPdf])
 
   const handleOwnCursorMove = useCallback((pos: { lineNumber: number; column: number }) => {
     setLocalCursorPos(pos)
@@ -184,6 +255,60 @@ export default function EditorPage() {
         readOnly={readOnly}
       />
 
+      {(!readOnly && !isConnected) && (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          gap: 12, padding: '8px 14px', background: '#3f1d2e', borderBottom: '1px solid #6b2147',
+          color: '#fecdd3', fontSize: 12,
+        }}>
+          <span>
+            Offline mode. Local edits stay in memory for up to 5 minutes and will replay when safe.
+            {reconnectingDelayMs ? ` Reconnecting in ${Math.ceil(reconnectingDelayMs / 1000)}s.` : ''}
+          </span>
+        </div>
+      )}
+
+      {reconcileState && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px',
+          background: '#3a2a12', borderBottom: '1px solid #7c5b14', color: '#fde68a', fontSize: 12,
+        }}>
+          <span style={{ flex: 1 }}>
+            Reconciliation required. The server document changed before your pending edits could be applied.
+          </span>
+          <button
+            onClick={() => {
+              updateDocSyncState({ content: reconcileState.localContent })
+              setReconcileState(null)
+            }}
+            style={{ background: '#f59e0b', color: '#111827', border: 'none', borderRadius: 6, padding: '6px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}
+          >
+            Review My Draft
+          </button>
+          <button
+            onClick={() => {
+              const socket = socketRef.current
+              if (!socket?.isOpen()) return
+              updateDocSyncState({ content: reconcileState.localContent })
+              socket.sendRevisionedUpdate(reconcileState.localContent, reconcileState.serverRevision)
+              setReconcileState(null)
+            }}
+            style={{ background: '#fef3c7', color: '#78350f', border: 'none', borderRadius: 6, padding: '6px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}
+          >
+            Overwrite With My Draft
+          </button>
+          <button
+            onClick={() => {
+              updateDocSyncState({ content: reconcileState.serverContent, content_revision: reconcileState.serverRevision })
+              setReconcileState(null)
+            }}
+            style={{ background: 'transparent', color: '#fde68a', border: '1px solid #7c5b14', borderRadius: 6, padding: '6px 10px', cursor: 'pointer', fontSize: 12 }}
+          >
+            Keep Server Version
+          </button>
+        </div>
+      )}
+
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         <div style={{ width: 200, flexShrink: 0, borderRight: '1px solid #1e1e3a', overflow: 'hidden' }}>
           <FileTree projectId={projectId} />
@@ -199,6 +324,7 @@ export default function EditorPage() {
             onRegisterGetCursorPos={(fn) => { getCursorPosRef.current = fn }}
             onCursorMove={handleOwnCursorMove}
             onSelectionQuote={(q) => setQuoteForChat(q)}
+            onLocalDocumentChange={handleLocalDocumentChange}
             pickingLocation={pickingEquationLocation}
             onLocationPicked={(loc) => { setEquationLocation(loc); setPickingEquationLocation(false) }}
             ownUsername={user?.username}

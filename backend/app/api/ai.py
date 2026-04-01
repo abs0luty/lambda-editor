@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
-from fastapi import APIRouter, Depends
+from datetime import datetime, timedelta, timezone
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -63,6 +64,7 @@ class SuggestChangesRequest(BaseModel):
 
 class TranslateDiffRequest(BaseModel):
     language: str
+    text: str = ""
     document_content: str
     variation_request: Optional[str] = ""
     project_id: Optional[str] = None
@@ -117,12 +119,44 @@ class ReviewStateUpdateRequest(BaseModel):
     rejected: list[str] = []
 
 
+AI_HISTORY_RETENTION_DAYS = 30
+
+
 async def _require_document_access(project_id: str, doc_id: str, user_id: str, db: AsyncSession):
     await _require_project(project_id, user_id, db)
     result = await db.execute(
         select(Document).where(Document.id == doc_id, Document.project_id == project_id)
     )
     return result.scalar_one_or_none()
+
+
+async def _purge_ai_history(db: AsyncSession, *, doc_id: Optional[str] = None):
+    cutoff = datetime.now(timezone.utc) - timedelta(days=AI_HISTORY_RETENTION_DAYS)
+    result = await db.execute(select(AIChatMessage))
+    expired = [
+        message
+        for message in result.scalars().all()
+        if message.created_at and message.created_at.replace(tzinfo=timezone.utc) < cutoff
+        and (doc_id is None or message.document_id == doc_id)
+    ]
+    if not expired:
+        return
+    for message in expired:
+        await db.delete(message)
+    await db.commit()
+
+
+async def _require_document_edit_access(project_id: Optional[str], doc_id: Optional[str], user_id: str, db: AsyncSession):
+    if not project_id or not doc_id:
+        raise HTTPException(status_code=400, detail="Missing project or document context")
+    await _require_project(project_id, user_id, db, min_role="editor")
+    result = await db.execute(
+        select(Document).where(Document.id == doc_id, Document.project_id == project_id)
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return doc
 
 
 def _loads(payload: Optional[str], fallback):
@@ -148,6 +182,7 @@ async def _persist_assistant_message(
     if not project_id or not doc_id or not message_id:
         return
 
+    await _purge_ai_history(db, doc_id=doc_id)
     doc = await _require_document_access(project_id, doc_id, user_id, db)
     if not doc:
         return
@@ -187,6 +222,7 @@ async def generate(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await _require_document_edit_access(req.project_id, req.doc_id, current_user.id, db)
     return _sse(
         ai_service.generate_text(req.prompt, req.document_context or ""),
         on_complete=lambda content: _persist_assistant_message(
@@ -206,6 +242,7 @@ async def rewrite(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await _require_document_edit_access(req.project_id, req.doc_id, current_user.id, db)
     return _sse(
         ai_service.rewrite_text(req.text, req.style, req.document_context or ""),
         on_complete=lambda content: _persist_assistant_message(
@@ -246,6 +283,7 @@ async def suggest_changes(
     db: AsyncSession = Depends(get_db),
 ):
     """Return a structured JSON diff: explanation + list of hunks with old_text/new_text."""
+    await _require_document_edit_access(req.project_id, req.doc_id, current_user.id, db)
     result = await ai_service.suggest_changes(req.instruction, req.document_content, req.variation_request or "")
     await _persist_assistant_message(
         db,
@@ -265,6 +303,7 @@ async def rewrite_diff(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await _require_document_edit_access(req.project_id, req.doc_id, current_user.id, db)
     result = await ai_service.rewrite_diff(req.text, req.style, req.document_content, req.variation_request or "")
     await _persist_assistant_message(
         db,
@@ -284,7 +323,8 @@ async def translate_diff(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await ai_service.translate_diff(req.language, req.document_content, req.variation_request or "")
+    await _require_document_edit_access(req.project_id, req.doc_id, current_user.id, db)
+    result = await ai_service.translate_diff(req.language, req.text, req.document_content, req.variation_request or "")
     await _persist_assistant_message(
         db,
         current_user.id,
@@ -292,7 +332,7 @@ async def translate_diff(
         req.doc_id,
         f"{req.action_id}-diff" if req.action_id else None,
         diff=result,
-        retry_action={"type": "translate", "language": req.language},
+        retry_action={"type": "translate", "language": req.language, "text": req.text},
     )
     return result
 
@@ -303,6 +343,7 @@ async def equation_diff(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await _require_document_edit_access(req.project_id, req.doc_id, current_user.id, db)
     result = await ai_service.equation_diff(
         req.description,
         req.document_content,
@@ -332,6 +373,7 @@ async def get_history(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await _purge_ai_history(db, doc_id=doc_id)
     doc = await _require_document_access(project_id, doc_id, current_user.id, db)
     if not doc:
         return []
@@ -371,6 +413,7 @@ async def update_review_state(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await _purge_ai_history(db, doc_id=doc_id)
     await _require_project(project_id, current_user.id, db, min_role="editor")
     result = await db.execute(
         select(AIChatMessage).where(

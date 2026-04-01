@@ -5,11 +5,13 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.database import get_db
+from app.models.ai_chat import AIChatMessage
 from app.models.document import Document
 from app.models.user import User
+from app.models.version import DocumentVersion
 from app.api.auth import get_current_user
 from app.api.projects import _require_project
 from app.websocket.manager import manager
@@ -31,6 +33,7 @@ class DocumentSummary(BaseModel):
     title: str
     owner_id: str
     project_id: str
+    content_revision: int
     updated_at: Optional[str] = None
 
     class Config:
@@ -43,6 +46,7 @@ class DocumentResponse(BaseModel):
     content: str
     owner_id: str
     project_id: str
+    content_revision: int
     compile_success: Optional[bool] = None
     compile_pdf_base64: Optional[str] = None
     compile_log: Optional[str] = None
@@ -57,6 +61,7 @@ def _doc_summary(doc: Document) -> dict:
         "title": doc.title,
         "owner_id": doc.owner_id,
         "project_id": doc.project_id,
+        "content_revision": doc.content_revision,
         "updated_at": doc.updated_at.isoformat() if doc.updated_at else None,
     }
 
@@ -76,6 +81,7 @@ async def list_documents(
     return [
         DocumentSummary(
             id=d.id, title=d.title, owner_id=d.owner_id, project_id=d.project_id,
+            content_revision=d.content_revision,
             updated_at=d.updated_at.isoformat() if d.updated_at else None,
         )
         for d in docs
@@ -144,6 +150,7 @@ async def update_document(
         doc.title = data.title
     if data.content is not None:
         doc.content = data.content
+        doc.content_revision += 1
 
     await db.commit()
     await db.refresh(doc)
@@ -174,6 +181,8 @@ async def delete_document(
         raise HTTPException(status_code=403, detail="Only the document owner or project owner can delete")
 
     deleted = _doc_summary(doc)
+    await db.execute(delete(DocumentVersion).where(DocumentVersion.document_id == doc_id))
+    await db.execute(delete(AIChatMessage).where(AIChatMessage.document_id == doc_id))
     await db.delete(doc)
     await db.commit()
     await manager.broadcast_to_room(
