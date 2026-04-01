@@ -15,11 +15,20 @@ from app.api.auth import get_current_user
 from app.api.projects import _require_project
 from app.database import get_db
 from app.services import ai_service
+from app.services import agent_service
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
 
 class GenerateRequest(BaseModel):
+    prompt: str
+    document_context: Optional[str] = ""
+    project_id: Optional[str] = None
+    doc_id: Optional[str] = None
+    action_id: Optional[str] = None
+
+
+class AgentRequest(BaseModel):
     prompt: str
     document_context: Optional[str] = ""
     project_id: Optional[str] = None
@@ -106,6 +115,8 @@ class ChatHistoryMessageResponse(BaseModel):
     action_type: Optional[str] = None
     action_prompt: Optional[str] = None
     quotes: Optional[list[dict]] = None
+    sources: Optional[list[dict]] = None
+    tool_calls: Optional[list[str]] = None
     diff: Optional[dict] = None
     retry_action: Optional[dict] = None
     accepted: Optional[list[str]] = None
@@ -176,6 +187,8 @@ async def _persist_assistant_message(
     message_id: Optional[str],
     *,
     content: str = "",
+    sources: Optional[list[dict]] = None,
+    tool_calls: Optional[list[str]] = None,
     diff: Optional[dict] = None,
     retry_action: Optional[dict] = None,
 ):
@@ -197,8 +210,13 @@ async def _persist_assistant_message(
         user_id=user_id,
         role="assistant",
         content=content,
+        quotes_json=json.dumps(sources) if sources is not None else None,
         diff_json=json.dumps(diff) if diff is not None else None,
-        retry_action_json=json.dumps(retry_action) if retry_action is not None else None,
+        retry_action_json=json.dumps(
+            retry_action if retry_action is not None else (
+                {"tool_calls": tool_calls} if tool_calls is not None else None
+            )
+        ) if (retry_action is not None or tool_calls is not None) else None,
     ))
     await db.commit()
 
@@ -234,6 +252,31 @@ async def generate(
             content=content,
         ),
     )
+
+
+@router.post("/agent")
+async def agent_chat(
+    req: AgentRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await _require_document_edit_access(req.project_id, req.doc_id, current_user.id, db)
+    try:
+        result = await agent_service.run_tool_enabled_chat(req.prompt, req.document_context or "")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    await _persist_assistant_message(
+        db,
+        current_user.id,
+        req.project_id,
+        req.doc_id,
+        f"{req.action_id}-res" if req.action_id else None,
+        content=result.get("content", ""),
+        sources=result.get("sources") or None,
+        tool_calls=result.get("tools_used") or None,
+    )
+    return result
 
 
 @router.post("/rewrite")
@@ -324,7 +367,12 @@ async def translate_diff(
     db: AsyncSession = Depends(get_db),
 ):
     await _require_document_edit_access(req.project_id, req.doc_id, current_user.id, db)
-    result = await ai_service.translate_diff(req.language, req.text, req.document_content, req.variation_request or "")
+    result = await agent_service.translate_diff_with_tool(
+        req.language,
+        req.text,
+        req.document_content,
+        req.variation_request or "",
+    )
     await _persist_assistant_message(
         db,
         current_user.id,
@@ -332,7 +380,12 @@ async def translate_diff(
         req.doc_id,
         f"{req.action_id}-diff" if req.action_id else None,
         diff=result,
-        retry_action={"type": "translate", "language": req.language, "text": req.text},
+        retry_action={
+            "type": "translate",
+            "language": req.language,
+            "text": req.text,
+            "tool_calls": result.get("tool_calls", []),
+        },
     )
     return result
 
@@ -392,9 +445,15 @@ async def get_history(
             content=message.content,
             action_type=message.action_type,
             action_prompt=message.action_prompt,
-            quotes=_loads(message.quotes_json, None),
+            quotes=_loads(message.quotes_json, None) if message.role == "user" else None,
+            sources=_loads(message.quotes_json, None) if message.role == "assistant" else None,
+            tool_calls=(
+                (_loads(message.diff_json, {}).get("tool_calls") if message.diff_json else _loads(message.retry_action_json, {}).get("tool_calls"))
+                if message.role == "assistant"
+                else None
+            ),
             diff=_loads(message.diff_json, None),
-            retry_action=_loads(message.retry_action_json, None),
+            retry_action=_loads(message.retry_action_json, None) if message.diff_json else None,
             accepted=_loads(message.accepted_json, []),
             rejected=_loads(message.rejected_json, []),
             from_user=username if message.role == "user" else None,

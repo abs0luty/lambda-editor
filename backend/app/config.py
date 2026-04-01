@@ -14,6 +14,10 @@ class Settings(BaseSettings):
 
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o"
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    GOOGLE_TRANSLATE_API_URL: str = "https://translation.googleapis.com/language/translate/v2"
+    GOOGLE_TRANSLATE_API_KEY: str = ""
+    GOOGLE_TRANSLATE_SOURCE_LANGUAGE: str = "auto"
 
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
 

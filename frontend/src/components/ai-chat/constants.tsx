@@ -76,6 +76,8 @@ export const mapStoredMessage = (message: any): ChatMessage => ({
   actionPrompt: message.action_prompt || undefined,
   retryAction: message.retry_action || undefined,
   quotes: message.quotes || undefined,
+  sources: message.sources || undefined,
+  toolCalls: Array.isArray(message.tool_calls) ? message.tool_calls : undefined,
   fromUser: message.from_user || undefined,
   accepted: Array.isArray(message.accepted) ? message.accepted : undefined,
   rejected: Array.isArray(message.rejected) ? message.rejected : undefined,

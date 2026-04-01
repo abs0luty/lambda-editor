@@ -22,6 +22,11 @@ export interface QuoteItem {
   filename: string
 }
 
+export interface SourceItem {
+  title: string
+  url: string
+}
+
 export interface EquationLocation {
   line: number
   text: string
@@ -48,6 +53,8 @@ export interface ChatMessage {
   actionLabel?: string
   actionColor?: string
   quotes?: QuoteItem[]
+  sources?: SourceItem[]
+  toolCalls?: string[]
   fromUser?: string
   accepted?: string[]
   rejected?: string[]

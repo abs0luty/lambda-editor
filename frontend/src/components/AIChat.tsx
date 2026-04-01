@@ -28,7 +28,7 @@ export default function AIChat({
   currentDocTitle,
 }: Props) {
   const selectedTextFromQuotes = (items: QuoteItem[]) => items[items.length - 1]?.text?.trim() || ''
-  const disclosureKey = 'ai-disclosure-accepted:v1'
+  const disclosureKey = 'ai-disclosure-accepted:v2'
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -36,7 +36,10 @@ export default function AIChat({
   const [equationLocation, setEquationLocation] = useState<EquationLocation | null>(null)
   const [retryAction, setRetryAction] = useState<ActionRequest | null>(null)
   const [quotes, setQuotes] = useState<QuoteItem[]>([])
-  const [aiDisclosureAccepted, setAiDisclosureAccepted] = useState<boolean>(() => sessionStorage.getItem(disclosureKey) === 'true')
+  const [aiDisclosureAccepted, setAiDisclosureAccepted] = useState<boolean>(() => {
+    if (localStorage.getItem(disclosureKey) === 'true') return true
+    return sessionStorage.getItem('ai-disclosure-accepted:v1') === 'true'
+  })
   const [accepted, setAccepted] = useState<Map<string, Set<string>>>(new Map())
   const [rejected, setRejected] = useState<Map<string, Set<string>>>(new Map())
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -166,7 +169,16 @@ export default function AIChat({
         setMessages((prev) => prev.some((m) => m.id === `${actionId}-diff`) ? prev : [...prev, {
           id: `${actionId}-diff`,
           role: 'assistant', content: '', streaming: false,
-          diff: msg.diff, fromUser, retryAction: retryRequest,
+          diff: msg.diff, toolCalls: msg.tool_calls || msg.diff?.tool_calls || undefined, fromUser, retryAction: retryRequest,
+        }])
+      } else if (event === 'agent_result') {
+        setMessages((prev) => prev.some((m) => m.id === `${actionId}-res`) ? prev : [...prev, {
+          id: `${actionId}-res`,
+          role: 'assistant',
+          content: msg.content || '',
+          sources: msg.sources || undefined,
+          toolCalls: msg.tool_calls || undefined,
+          fromUser,
         }])
       }
     })
@@ -198,10 +210,50 @@ export default function AIChat({
     setLoading(false)
   }
 
-  const addDiff = (id: string, diff: { explanation: string; changes: DiffChange[] }, retryRequest?: ActionRequest) => {
+  const addDiff = (
+    id: string,
+    diff: { explanation: string; changes: DiffChange[]; tool_calls?: string[] },
+    retryRequest?: ActionRequest,
+    toolCalls?: ChatMessage['toolCalls'],
+  ) => {
     setMessages((prev) => [...prev, {
-      id, role: 'assistant', content: '', streaming: false, diff, retryAction: retryRequest,
+      id, role: 'assistant', content: '', streaming: false, diff, retryAction: retryRequest, toolCalls,
     }])
+  }
+
+  const addAssistantMsg = (id: string, content: string, sources?: ChatMessage['sources'], toolCalls?: ChatMessage['toolCalls']) => {
+    setMessages((prev) => [...prev, {
+      id,
+      role: 'assistant',
+      content,
+      streaming: false,
+      sources,
+      toolCalls,
+    }])
+  }
+
+  const renderToolCalls = (toolCalls?: ChatMessage['toolCalls']) => {
+    if (!toolCalls || toolCalls.length === 0) return null
+    return (
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, maxWidth: '100%' }}>
+        {toolCalls.map((toolName, index) => (
+          <span
+            key={`${toolName}-${index}`}
+            style={{
+              fontSize: 10,
+              color: '#cbd5e1',
+              background: '#111827',
+              border: '1px solid #374151',
+              borderRadius: 999,
+              padding: '3px 7px',
+              textTransform: 'lowercase',
+            }}
+          >
+            {toolName}
+          </span>
+        ))}
+      </div>
+    )
   }
 
   // ── Stream helper ────────────────────────────────────────────────────────────
@@ -264,13 +316,33 @@ export default function AIChat({
 
     addUserMsg({ role: 'user', content: text, quotes: currentQuotes }, aid)
     broadcast({ event: 'user_msg', content: text, quotes: currentQuotes, action_id: aid })
-    await runStream('/ai/generate', {
-      prompt: fullPrompt,
-      document_context: currentDoc?.content ?? '',
-      project_id: currentDoc?.project_id,
-      doc_id: currentDoc?.id,
-      action_id: aid,
-    }, aid)
+    try {
+      const res = await aiChatApi.agent({
+        prompt: fullPrompt,
+        document_context: currentDoc?.content ?? '',
+        project_id: currentDoc?.project_id,
+        doc_id: currentDoc?.id,
+        action_id: aid,
+      })
+      addAssistantMsg(
+        `${aid}-res`,
+        res.data.content || '',
+        res.data.sources || undefined,
+        Array.isArray(res.data.tools_used) ? res.data.tools_used : undefined,
+      )
+      broadcast({
+        event: 'agent_result',
+        action_id: aid,
+        content: res.data.content || '',
+        sources: res.data.sources || undefined,
+        tool_calls: Array.isArray(res.data.tools_used) ? res.data.tools_used : undefined,
+      })
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail
+      addAssistantMsg(`${aid}-res`, `**Error:** ${typeof detail === 'string' ? detail : 'Agent request failed.'}`)
+    } finally {
+      setLoading(false)
+    }
   }
 
   const runDiffAction = async (request: ActionRequest, currentQuotes: QuoteItem[], variationRequest = '') => {
@@ -323,8 +395,9 @@ export default function AIChat({
           action_id: aid,
         })
       }
-      addDiff(`${aid}-diff`, res.data, request)
-      broadcast({ event: 'diff', diff: res.data, action_id: aid, action_request: request })
+      const toolCalls = Array.isArray(res.data.tool_calls) ? res.data.tool_calls : undefined
+      addDiff(`${aid}-diff`, res.data, request, toolCalls)
+      broadcast({ event: 'diff', diff: res.data, tool_calls: toolCalls, action_id: aid, action_request: request })
     } catch {
       const explanation = request.type === 'equation'
         ? 'Could not generate equation.'
@@ -563,7 +636,7 @@ export default function AIChat({
             <div style={{ marginTop: 10, display: 'flex', justifyContent: 'flex-end' }}>
               <button
                 onClick={() => {
-                  sessionStorage.setItem(disclosureKey, 'true')
+                  localStorage.setItem(disclosureKey, 'true')
                   setAiDisclosureAccepted(true)
                 }}
                 style={{ background: '#60a5fa', color: '#0f172a', border: 'none', borderRadius: 6, padding: '6px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}
@@ -575,7 +648,7 @@ export default function AIChat({
         )}
         {messages.length === 0 && (
           <div style={{ color: '#3a3a6a', fontSize: 12, textAlign: 'center', marginTop: 48, lineHeight: 1.8 }}>
-            {canInvokeAI ? 'Ask anything or pick an action above.' : 'AI actions are unavailable in viewer mode.'}
+            {canInvokeAI ? 'Ask anything. Chat can now use web search, research, and translation tools.' : 'AI actions are unavailable in viewer mode.'}
           </div>
         )}
         {messages.map((m) => {
@@ -633,7 +706,8 @@ export default function AIChat({
                   ) : null}
                 </div>
               ) : m.diff ? (
-                <div style={{ width: '100%' }}>
+                <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {renderToolCalls(m.toolCalls)}
                   <DiffView
                     explanation={m.diff.explanation}
                     changes={m.diff.changes}
@@ -655,9 +729,40 @@ export default function AIChat({
                   />
                 </div>
               ) : (
-                <div style={botBubble}>
-                  <MarkdownMessage content={m.content} onInsertText={onInsertText} />
-                  {m.streaming && <span style={{ opacity: 0.4, fontSize: 12 }}>▊</span>}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxWidth: '100%' }}>
+                  <div style={botBubble}>
+                    <MarkdownMessage content={m.content} onInsertText={onInsertText} />
+                    {m.streaming && <span style={{ opacity: 0.4, fontSize: 12 }}>▊</span>}
+                  </div>
+                  {renderToolCalls(m.toolCalls)}
+                  {m.sources && m.sources.length > 0 && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, maxWidth: '100%' }}>
+                      {m.sources.map((source, index) => (
+                        <a
+                          key={`${m.id}-source-${index}`}
+                          href={source.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{
+                            fontSize: 11,
+                            color: '#93c5fd',
+                            background: '#172033',
+                            border: '1px solid #274060',
+                            borderRadius: 999,
+                            padding: '4px 8px',
+                            textDecoration: 'none',
+                            maxWidth: 220,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                          title={source.url}
+                        >
+                          {source.title}
+                        </a>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

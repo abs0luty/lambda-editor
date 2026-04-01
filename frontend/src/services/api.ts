@@ -82,6 +82,13 @@ export const compileApi = {
 }
 
 export const aiChatApi = {
+  agent: (payload: {
+    prompt: string
+    document_context?: string
+    project_id?: string
+    doc_id?: string
+    action_id?: string
+  }) => api.post('/ai/agent', payload),
   history: (projectId: string, docId: string) => api.get(`/ai/history/${projectId}/${docId}`),
   updateReviewState: (projectId: string, docId: string, messageId: string, accepted: string[], rejected: string[]) =>
     api.patch(`/ai/history/${projectId}/${docId}/${messageId}/review`, { accepted, rejected }),

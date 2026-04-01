@@ -265,43 +265,6 @@ async def rewrite_diff(text: str, style: str, document_content: str, variation_r
     return _parse_diff_json(response.choices[0].message.content or "{}")
 
 
-async def translate_diff(language: str, text: str, document_content: str, variation_request: str = "") -> dict:
-    """Return a structured diff for translating a selected document region."""
-    selected_text = text.strip()
-    if not language.strip():
-        return {"explanation": "Target language is required.", "changes": []}
-    if not selected_text:
-        return {"explanation": "Select or quote the passage you want to translate first.", "changes": []}
-
-    system = (
-        LATEX_SYSTEM_PROMPT
-        + "\n\nTranslate the selected LaTeX passage and respond ONLY with JSON matching:\n"
-        + '{"explanation":"...","changes":[{"id":"c1","description":"...","old_text":"...","new_text":"..."}]}\n'
-        + "Rules:\n"
-        + "- Translate ONLY the selected passage\n"
-        + "- old_text must be the exact selected passage, copied verbatim from the document\n"
-        + "- Return one or more changes that together replace only that selected passage\n"
-        + "- Preserve ALL LaTeX commands, environments, math notation, and formatting\n"
-        + "- Translate only human-readable text content between commands\n"
-        + "- Output ONLY valid JSON, no markdown fences"
-    )
-    response = await client.chat.completions.create(
-        model=settings.OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": (
-                f"Translate this selected passage to {language}:\n\nSelected passage:\n```latex\n{selected_text[:4000]}\n```\n\n"
-                f"Document:\n```latex\n{document_content[:8000]}\n```"
-                + (f"\n\nMake it meaningfully different in this way: {variation_request}" if variation_request else "")
-            )},
-        ],
-        stream=False,
-        max_tokens=6000,
-        response_format={"type": "json_object"},
-    )
-    return _parse_diff_json(response.choices[0].message.content or "{}")
-
-
 async def equation_diff(description: str, document_content: str, location: Optional[dict] = None, variation_request: str = "") -> dict:
     """Generate an equation and return a diff inserting it at the specified location."""
     if location:
