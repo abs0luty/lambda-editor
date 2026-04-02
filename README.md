@@ -6,7 +6,7 @@ This is Lambda. My team's project for AI1220: a remake of Overleaf with AI featu
 
 - **Role-aware collaboration** with `owner`, `editor`, and `viewer` permissions
 - **Invite links** with a per-project limit and pre-assigned access role
-- **Y.js-powered collaborative editing** with a dedicated FastAPI sync backend, binary WebSocket transport, and conflict-free CRDT merges across all connected editors
+- **Y.js-powered collaborative editing** with a dedicated FastAPI sync backend, Redis-backed CRDT state sharing, binary WebSocket transport, and conflict-free merges across all connected editors
 - **Real-time project file sync** so document create, rename, and delete events update every connected client immediately
 - **Monaco-powered LaTeX editor** with snippets, selection quoting, and insertion helpers
 - **Built-in AI assistant** with tool-enabled chat for web search, research, translation, rewriting, equation insertion, error explanation, and structured document edits
@@ -30,7 +30,7 @@ This is Lambda. My team's project for AI1220: a remake of Overleaf with AI featu
 | Backend | FastAPI, SQLAlchemy async, PostgreSQL, WebSockets |
 | AI | OpenAI Responses API for tool-enabled chat, OpenAI streaming for rewrite/generation actions, Google Cloud Translation API for translation tool calls |
 | Auth | Redis-backed server-side sessions with HTTP-only cookies |
-| Collaboration | Yjs CRDT (`pycrdt` on server, `y-websocket` + `y-monaco` on client), Redis pub/sub for presence and project events |
+| Collaboration | Yjs CRDT (`pycrdt` on server, `y-websocket` + `y-monaco` on client), Redis-backed CRDT state/pub-sub, Redis pub/sub for presence and project events |
 | Output | Rendered export to `PDF`, `DVI`, and `PS` via `pdflatex`, `xelatex`, `lualatex`, or `tectonic` |
 | Default storage | PostgreSQL via `postgresql+asyncpg` |
 
@@ -123,11 +123,13 @@ This script:
 
 Y.js document syncing is handled by the backend directly rather than by a separate collaboration service. FastAPI exposes a dedicated binary WebSocket endpoint at `/ws/{doc_id}/sync`, and authenticated clients connect to it through `y-websocket` from the frontend.
 
-For each open document, the backend creates or reuses an in-memory `Y.Doc` backed by `pycrdt`. On first connection, that `Y.Doc` is initialized from the document content stored in PostgreSQL. Incoming Y.js updates are applied on the server, rebroadcast to the other collaborators in the same room, and persisted back to PostgreSQL with a short debounce so the database is not written on every keystroke.
+For each open document, the backend creates or reuses a `pycrdt` `Doc` for the connected clients in that process, but the active CRDT state is shared through Redis instead of living only in process memory. On first connection, the room loads the latest merged CRDT update from Redis; if none exists yet, it seeds Redis from the document content stored in PostgreSQL.
+
+Incoming Y.js updates are applied locally, merged back into Redis, and published over a document-scoped Redis pub/sub channel so other backend instances can apply and rebroadcast the same CRDT delta to their connected clients. PostgreSQL is still updated with debounced text snapshots so version history, reloads, and non-CRDT API reads continue to use the database safely.
 
 The Y.js sync channel is separate from the existing JSON WebSocket channel at `/ws/{doc_id}`. The JSON socket still handles presence, cursor state, AI chat relay, and compile-result broadcasts, while the Y.js socket is responsible only for CRDT document content synchronization. Backend permission checks still apply at connection time, and `viewer` users are kept read-only by dropping sync updates server-side.
 
-Version restore also flows through this backend integration. When a restore request updates `doc.content` through the REST API, the backend calls `invalidate_room(...)` in the Y.js handler, replaces the current server-side `Y.Text`, and broadcasts the resulting delta so every connected editor updates immediately.
+Version restore also flows through this backend integration. When a restore request updates `doc.content` through the REST API, the backend calls `invalidate_room(...)` in the Y.js handler, updates the Redis-backed CRDT state, and broadcasts the resulting delta so every connected editor across backend instances updates immediately.
 
 <details>
 <summary><strong>Collaboration model</strong></summary>
@@ -143,12 +145,13 @@ The implementation uses two WebSocket connections per open document:
 | JSON channel | `/ws/{doc_id}` | JSON text frames | Presence, cursors, AI chat relay, compile results, title |
 | CRDT channel | `/ws/{doc_id}/sync` | Binary y-websocket protocol | Document text sync |
 
-**Server side (`yjs_handler.py`)** - written in Python using `pycrdt`:
-1. One `Doc` is kept in memory per open document, initialized from `doc.content` in PostgreSQL on first connection.
+**Server side (`yjs_handler.py`)** - written in Python using `pycrdt` and Redis:
+1. One `Doc` is kept per open document per process, but its state is hydrated from Redis on room startup instead of being authoritative only in local memory.
 2. On client connect the server sends `[SYNC, STEP1, state_vector]`; the client responds with the updates it has that the server is missing, and the server replies with what the client is missing (`STEP2`). After this exchange both sides are identical.
-3. Real-time edits arrive as `[SYNC, UPDATE, update_bytes]`, are applied with `Y.apply_update`, and rebroadcast to all other clients in the same room.
-4. Saves are debounced (2 s) to avoid hammering PostgreSQL on every keystroke; a final save runs when the last client leaves.
-5. `invalidate_room(doc_id, content)` replaces the in-memory Y.Doc text and broadcasts the delta — called by the version-restore REST endpoint so all open editors instantly receive the restored content.
+3. Real-time edits arrive as `[SYNC, UPDATE, update_bytes]`, are applied with `Doc.apply_update(...)`, merged into the Redis-stored document update, and published over a per-document Redis channel.
+4. Every process with clients in that document subscribes to the Redis channel, applies remote updates to its own `Doc`, and rebroadcasts them to its local websocket clients.
+5. Saves are debounced (2 s) to avoid hammering PostgreSQL on every keystroke; a final save runs when the last client leaves.
+6. `invalidate_room(doc_id, content)` updates Redis-backed CRDT state and broadcasts the resulting delta — called by the version-restore REST endpoint so all open editors on all backend instances receive the restored content.
 
 **Client side** - uses the pre-installed `y-websocket` and `y-monaco` npm packages:
 1. `WebsocketProvider` opens the binary CRDT channel and keeps it alive with automatic reconnection.
@@ -158,7 +161,7 @@ The implementation uses two WebSocket connections per open document:
 
 **AI-suggested edits** - when a user accepts a diff from the AI chat panel, `applyChange` and `handleAcceptAll` write directly into `Y.Text` via `ydoc.transact()`. Yjs broadcasts the change to all peers exactly like a manual keystroke.
 
-**Version restore** - the REST handler updates `doc.content` in PostgreSQL, then calls `yjs_handler.invalidate_room` which atomically replaces the server `Y.Text` (delete + insert in a single transaction) and broadcasts the resulting delta update to every connected client.
+**Version restore** - the REST handler updates `doc.content` in PostgreSQL, then calls `yjs_handler.invalidate_room` which rewrites the Redis-backed CRDT text state and broadcasts the resulting delta update to every connected client across all backend instances.
 
 **Presence and cursors** still travel over the JSON channel and are rendered as Monaco editor decorations, unchanged from before.
 

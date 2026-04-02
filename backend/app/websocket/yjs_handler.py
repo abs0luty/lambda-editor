@@ -2,21 +2,28 @@
 Yjs CRDT sync — binary y-websocket protocol served directly by FastAPI.
 
 Clients use `WebsocketProvider` from the `y-websocket` npm package to connect
-to /ws/{doc_id}/sync.  Server maintains an authoritative Y.Doc per document,
-debounces DB saves, and supports version-restore via `invalidate_room`.
+to /ws/{doc_id}/sync. Server keeps a per-process working Doc for connected
+clients, while Redis stores the active CRDT state and fans out updates across
+backend instances. PostgreSQL remains the durable snapshot/version store.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
+import uuid
+from contextlib import suppress
 from typing import Dict, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
-from pycrdt import Doc, Text, get_state
+from pycrdt import Doc, Text, get_state, merge_updates
+from redis.exceptions import WatchError
 from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
 from app.models.document import Document
 from app.models.project import ProjectMember
+from app.redis_client import redis_client
 
 
 # ── lib0 variable-length uint helpers ────────────────────────────────────────
@@ -54,6 +61,17 @@ _AWARENESS = 1
 _STEP1 = 0
 _STEP2 = 1
 _UPDATE = 2
+_INSTANCE_ID = uuid.uuid4().hex
+
+
+def _b64encode(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def _b64decode(data: Optional[str]) -> Optional[bytes]:
+    if not data:
+        return None
+    return base64.b64decode(data.encode("ascii"))
 
 
 def _msg_step1(sv: bytes) -> bytes:
@@ -77,15 +95,45 @@ class _Room:
         self.ydoc = Doc()
         self._clients: Dict[str, WebSocket] = {}
         self._lock = asyncio.Lock()
+        self._init_lock = asyncio.Lock()
         self._save_task: Optional[asyncio.Task] = None
+        self._pubsub = None
+        self._listener_task: Optional[asyncio.Task] = None
+        self._initialized = False
+        self._initial_content = initial_content
+        self.ydoc["content"] = Text()
 
-        self.ydoc["content"] = Text(initial_content)
+    @property
+    def _update_key(self) -> str:
+        return f"yjs:doc:{self.doc_id}:update"
+
+    @property
+    def _channel(self) -> str:
+        return f"yjs:doc:{self.doc_id}:updates"
 
     def _text(self) -> Text:
         return self.ydoc.get("content", type=Text)
 
     def _state_vector(self) -> bytes:
         return get_state(self.ydoc.get_update())
+
+    async def initialize(self) -> None:
+        async with self._init_lock:
+            if self._initialized:
+                return
+
+            cached = _b64decode(await redis_client.get(self._update_key))
+            if cached:
+                self.ydoc.apply_update(cached)
+            else:
+                if self._initial_content:
+                    text = self._text()
+                    with self.ydoc.transaction():
+                        text.clear()
+                        text += self._initial_content
+                await self._write_full_state_to_redis()
+
+            self._initialized = True
 
     def get_text(self) -> str:
         return str(self._text())
@@ -99,11 +147,14 @@ class _Room:
             if new_content:
                 ytext += new_content
         delta = self.ydoc.get_update(old_sv)
+        await self._write_full_state_to_redis()
+        await self._publish_update(delta)
         await self._broadcast(_msg_update(delta))
 
     async def add(self, cid: str, ws: WebSocket) -> None:
         async with self._lock:
             self._clients[cid] = ws
+            await self._ensure_listener()
 
     async def remove(self, cid: str) -> None:
         async with self._lock:
@@ -124,6 +175,86 @@ class _Room:
                 dead.append(cid)
         for cid in dead:
             await self.remove(cid)
+
+    async def _ensure_listener(self) -> None:
+        if self._listener_task and not self._listener_task.done():
+            return
+        self._pubsub = redis_client.pubsub()
+        await self._pubsub.subscribe(self._channel)
+        self._listener_task = asyncio.create_task(self._listen())
+
+    async def _listen(self) -> None:
+        assert self._pubsub is not None
+        try:
+            async for message in self._pubsub.listen():
+                if message.get("type") != "message":
+                    continue
+                try:
+                    payload = json.loads(message["data"])
+                    if payload.get("sender") == _INSTANCE_ID:
+                        continue
+                    update = _b64decode(payload.get("update"))
+                    if not update:
+                        continue
+                except Exception:
+                    continue
+                try:
+                    self.ydoc.apply_update(update)
+                except Exception:
+                    continue
+                await self._broadcast(_msg_update(update))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    async def close(self) -> None:
+        if self._listener_task:
+            self._listener_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._listener_task
+            self._listener_task = None
+        if self._pubsub:
+            await self._pubsub.unsubscribe(self._channel)
+            await self._pubsub.aclose()
+            self._pubsub = None
+
+    async def _write_full_state_to_redis(self) -> None:
+        await redis_client.set(self._update_key, _b64encode(self.ydoc.get_update()))
+
+    async def _merge_update_into_redis(self, update: bytes) -> None:
+        for _ in range(5):
+            try:
+                async with redis_client.pipeline(transaction=True) as pipe:
+                    await pipe.watch(self._update_key)
+                    current = _b64decode(await pipe.get(self._update_key))
+                    merged = merge_updates(current, update) if current else update
+                    pipe.multi()
+                    pipe.set(self._update_key, _b64encode(merged))
+                    await pipe.execute()
+                    return
+            except WatchError:
+                continue
+            except Exception:
+                break
+        await self._write_full_state_to_redis()
+
+    async def _publish_update(self, update: bytes) -> None:
+        await redis_client.publish(
+            self._channel,
+            json.dumps({"sender": _INSTANCE_ID, "update": _b64encode(update)}),
+        )
+
+    async def apply_client_update(self, update: bytes, exclude_user_id: Optional[str] = None) -> bool:
+        try:
+            self.ydoc.apply_update(update)
+        except Exception:
+            return False
+        await self._merge_update_into_redis(update)
+        await self._publish_update(update)
+        await self.schedule_save()
+        await self._broadcast(_msg_update(update), exclude=exclude_user_id)
+        return True
 
     async def schedule_save(self) -> None:
         if self._save_task and not self._save_task.done():
@@ -165,7 +296,35 @@ async def _get_room(doc_id: str, initial_content: str) -> _Room:
     async with _registry_lock:
         if doc_id not in _rooms:
             _rooms[doc_id] = _Room(doc_id, initial_content)
-        return _rooms[doc_id]
+        room = _rooms[doc_id]
+    await room.initialize()
+    return room
+
+
+async def _replace_doc_state_in_redis(doc_id: str, new_content: str) -> bytes:
+    update_key = f"yjs:doc:{doc_id}:update"
+    current = _b64decode(await redis_client.get(update_key))
+
+    doc = Doc()
+    doc["content"] = Text()
+    if current:
+        doc.apply_update(current)
+
+    old_sv = get_state(doc.get_update())
+    with doc.transaction():
+        text = doc.get("content", type=Text)
+        text.clear()
+        if new_content:
+            text += new_content
+
+    full_state = doc.get_update()
+    delta = doc.get_update(old_sv)
+    await redis_client.set(update_key, _b64encode(full_state))
+    await redis_client.publish(
+        f"yjs:doc:{doc_id}:updates",
+        json.dumps({"sender": _INSTANCE_ID, "update": _b64encode(delta)}),
+    )
+    return delta
 
 
 async def invalidate_room(doc_id: str, new_content: str) -> None:
@@ -174,6 +333,8 @@ async def invalidate_room(doc_id: str, new_content: str) -> None:
         room = _rooms.get(doc_id)
     if room:
         await room.replace_content(new_content)
+        return
+    await _replace_doc_state_in_redis(doc_id, new_content)
 
 
 async def _release(doc_id: str) -> None:
@@ -183,6 +344,7 @@ async def _release(doc_id: str) -> None:
             if room._save_task and not room._save_task.done():
                 room._save_task.cancel()
             await room._persist()
+            await room.close()
             del _rooms[doc_id]
 
 
@@ -249,12 +411,9 @@ async def handle_yjs_room(websocket: WebSocket, doc_id: str, user_id: str) -> No
 
                 elif sync_type in (_STEP2, _UPDATE):
                     if not read_only:
-                        try:
-                            room.ydoc.apply_update(payload)
-                        except Exception:
+                        applied = await room.apply_client_update(payload, exclude_user_id=user_id)
+                        if not applied:
                             continue
-                        await room.schedule_save()
-                        await room._broadcast(_msg_update(payload), exclude=user_id)
 
             elif msg_type == _AWARENESS:
                 # Forward awareness (remote cursors) unchanged to all other clients
