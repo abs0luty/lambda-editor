@@ -138,7 +138,10 @@ async def _require_document_access(project_id: str, doc_id: str, user_id: str, d
     result = await db.execute(
         select(Document).where(Document.id == doc_id, Document.project_id == project_id)
     )
-    return result.scalar_one_or_none()
+    doc = result.scalar_one_or_none()
+    if doc and doc.kind != "latex":
+        raise HTTPException(status_code=400, detail="AI chat is only available for LaTeX documents")
+    return doc
 
 
 async def _purge_ai_history(db: AsyncSession, *, doc_id: Optional[str] = None):
@@ -167,6 +170,8 @@ async def _require_document_edit_access(project_id: Optional[str], doc_id: Optio
     doc = result.scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
+    if doc.kind != "latex":
+        raise HTTPException(status_code=400, detail="AI chat is only available for LaTeX documents")
     return doc
 
 

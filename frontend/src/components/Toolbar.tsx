@@ -13,6 +13,8 @@ interface Props {
   onToggleVersionHistory: () => void
   projectId?: string
   readOnly?: boolean
+  isLatexDoc?: boolean
+  isEditableDoc?: boolean
 }
 
 interface Invite {
@@ -47,7 +49,7 @@ function Avatar({ p }: { p: Presence }) {
 export default function Toolbar({
   onToggleAI, onTogglePreview, showAI, showPreview,
   showVersionHistory, onToggleVersionHistory,
-  projectId, readOnly,
+  projectId, readOnly, isLatexDoc = true, isEditableDoc = true,
 }: Props) {
   const navigate = useNavigate()
   const { currentDoc, currentProject, user, isConnected, presence, logout } = useStore()
@@ -158,6 +160,16 @@ export default function Toolbar({
           }}>
             {currentDoc?.title || 'No document open'}
           </span>
+          {currentDoc && (
+            <span style={{
+              fontSize: 10, padding: '2px 7px', borderRadius: 999,
+              background: currentDoc.kind === 'latex' ? '#312e81' : '#164e63',
+              color: currentDoc.kind === 'latex' ? '#c7d2fe' : '#a5f3fc',
+              textTransform: 'uppercase', letterSpacing: 0.4,
+            }}>
+              {currentDoc.kind}
+            </span>
+          )}
           {readOnly && (
             <span title="Viewer — read only" style={{ color: '#6b7280', display: 'flex', alignItems: 'center' }}>
               <Lock size={11} />
@@ -166,15 +178,29 @@ export default function Toolbar({
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 4 }}>
-          {isConnected
-            ? <Wifi size={11} color="#4ade80" />
-            : <WifiOff size={11} color="#f87171" />}
-          <span style={{ fontSize: 11, color: isConnected ? '#4ade80' : '#f87171' }}>
-            {isConnected ? 'Live' : 'Offline'}
-          </span>
+          {isLatexDoc ? (
+            <>
+              {isConnected
+                ? <Wifi size={11} color="#4ade80" />
+                : <WifiOff size={11} color="#f87171" />}
+              <span style={{ fontSize: 11, color: isConnected ? '#4ade80' : '#f87171' }}>
+                {isConnected ? 'Live' : 'Offline'}
+              </span>
+            </>
+          ) : isEditableDoc ? (
+            <>
+              <Eye size={11} color="#38bdf8" />
+              <span style={{ fontSize: 11, color: '#38bdf8' }}>Editable file</span>
+            </>
+          ) : (
+            <>
+              <Eye size={11} color="#38bdf8" />
+              <span style={{ fontSize: 11, color: '#38bdf8' }}>Static file</span>
+            </>
+          )}
         </div>
 
-        {presence.length > 0 && (
+        {isEditableDoc && presence.length > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', marginLeft: 4, paddingLeft: 6 }}>
             {presence.slice(0, 6).map((p) => <Avatar key={p.user_id} p={p} />)}
             {presence.length > 6 && (
@@ -186,12 +212,12 @@ export default function Toolbar({
         <div style={{ flex: 1 }} />
 
         {/* Reopen buttons — only shown when panel is hidden */}
-        {!showPreview && (
+        {isLatexDoc && !showPreview && (
           <button onClick={onTogglePreview} style={iconBtnStyle} title="Open PDF Preview">
             <Eye size={15} />
           </button>
         )}
-        {!showAI && (
+        {isLatexDoc && !showAI && (
           <button onClick={onToggleAI} style={iconBtnStyle} title="Open AI Assistant">
             <Bot size={15} />
           </button>
@@ -212,7 +238,7 @@ export default function Toolbar({
         )}
 
         {/* Version history */}
-        {!readOnly && (
+        {isEditableDoc && !readOnly && (
           <button
             onClick={onToggleVersionHistory}
             style={{ ...iconBtnStyle, color: showVersionHistory ? '#818cf8' : '#9ca3af' }}
@@ -222,7 +248,7 @@ export default function Toolbar({
           </button>
         )}
 
-        {!readOnly && (
+        {isEditableDoc && !readOnly && (
           <button onClick={saveDoc} disabled={saving || !currentDoc} style={iconBtnStyle} title="Save">
             {saving
               ? <Loader2 size={15} style={{ animation: 'spin 1s linear infinite' }} />

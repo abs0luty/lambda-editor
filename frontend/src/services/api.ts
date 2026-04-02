@@ -50,14 +50,27 @@ export const projectsApi = {
 // ── Documents (project-scoped) ────────────────────────────────────────────────
 export const docsApi = {
   list: (projectId: string) => api.get(`/projects/${projectId}/documents`),
-  create: (projectId: string, title: string, content = '') =>
-    api.post(`/projects/${projectId}/documents`, { title, content }),
+  listFolders: (projectId: string) => api.get(`/projects/${projectId}/documents/folders`),
+  createFolder: (projectId: string, path: string) =>
+    api.post(`/projects/${projectId}/documents/folders`, { path }),
+  create: (projectId: string, path: string, content = '') =>
+    api.post(`/projects/${projectId}/documents`, { path, content }),
+  upload: (projectId: string, file: File, path?: string) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    if (path?.trim()) formData.append('path', path.trim())
+    return api.post(`/projects/${projectId}/documents/upload`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
   get: (projectId: string, docId: string) =>
     api.get(`/projects/${projectId}/documents/${docId}`),
-  update: (projectId: string, docId: string, data: { title?: string; content?: string }) =>
+  update: (projectId: string, docId: string, data: { title?: string; path?: string; content?: string }) =>
     api.patch(`/projects/${projectId}/documents/${docId}`, data),
   delete: (projectId: string, docId: string) =>
     api.delete(`/projects/${projectId}/documents/${docId}`),
+  downloadUrl: (projectId: string, docId: string) =>
+    `/api/projects/${projectId}/documents/${docId}/download`,
 }
 
 // ── Versions ──────────────────────────────────────────────────────────────────
@@ -74,10 +87,11 @@ export const versionsApi = {
 
 // ── Compile ───────────────────────────────────────────────────────────────────
 export const compileApi = {
-  compile: (content: string, projectId?: string, docId?: string) => api.post('/compile', {
+  compile: (content: string, projectId?: string, docId?: string, outputFormat = 'pdf') => api.post('/compile', {
     content,
     project_id: projectId,
     doc_id: docId,
+    output_format: outputFormat,
   }),
 }
 

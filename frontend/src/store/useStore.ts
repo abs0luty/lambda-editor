@@ -18,9 +18,14 @@ export interface Project {
 export interface Document {
   id: string
   title: string
+  path: string
+  kind: 'latex' | 'text' | 'uploaded'
   content?: string
   owner_id: string
   project_id: string
+  source_filename?: string | null
+  mime_type?: string | null
+  file_size?: number | null
   content_revision?: number
   updated_at?: string
   compile_success?: boolean | null

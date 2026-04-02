@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     GOOGLE_TRANSLATE_SOURCE_LANGUAGE: str = "auto"
 
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
+    UPLOADS_DIR: str = "backend/uploads"
 
     @property
     def cors_origins_list(self) -> List[str]:

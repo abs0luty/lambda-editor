@@ -182,9 +182,12 @@ async def create_project(
     main_doc = Document(
         id=str(uuid.uuid4()),
         title="main.tex",
+        path="main.tex",
+        kind="latex",
         content=MAIN_TEX_TEMPLATE,
         project_id=project.id,
         owner_id=current_user.id,
+        mime_type="text/x-tex",
     )
     db.add(main_doc)
     await db.commit()

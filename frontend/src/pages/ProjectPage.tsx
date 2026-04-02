@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   ArrowLeft, FilePlus, Trash2, FileText, Users, Copy, Check,
-  Shield, Eye, Edit3, Crown, Link, Plus, X,
+  Shield, Eye, Edit3, Crown, Link, Plus, Upload, X,
 } from 'lucide-react'
 import { projectsApi, docsApi } from '../services/api'
 import { ProjectSocket } from '../services/socket'
@@ -39,6 +39,7 @@ export default function ProjectPage() {
   const [newInviteRole, setNewInviteRole] = useState<'editor' | 'viewer'>('editor')
   const [newInviteLabel, setNewInviteLabel] = useState('')
   const [error, setError] = useState('')
+  const [uploading, setUploading] = useState(false)
 
   useEffect(() => {
     if (!projectId) return
@@ -83,10 +84,12 @@ export default function ProjectPage() {
   // If main_doc_id wasn't available on first load, redirect once docs finish loading
   useEffect(() => {
     if (!loadingDocs && documents.length > 0 && projectId) {
-      const mainDoc = documents.find((d) => d.title === 'main.tex') ?? documents[0]
+      const mainDoc = documents.find((d) => d.kind === 'latex' && d.title === 'main.tex')
+        ?? documents.find((d) => d.kind !== 'uploaded')
+        ?? documents[0]
       navigate(`/projects/${projectId}/docs/${mainDoc.id}`, { replace: true })
     }
-  }, [loadingDocs])
+  }, [loadingDocs, documents, navigate, projectId])
 
   const loadInvites = async () => {
     if (!projectId) return
@@ -123,13 +126,26 @@ export default function ProjectPage() {
   const createDoc = async () => {
     if (!newDocTitle.trim() || !projectId) return
     try {
-      const r = await docsApi.create(projectId, newDocTitle.trim())
+      const r = await docsApi.create(projectId, newDocTitle.trim(), '')
       upsertDocument(r.data)
       setNewDocTitle('')
       setCreatingDoc(false)
       navigate(`/projects/${projectId}/docs/${r.data.id}`)
     } catch {
       setError('Failed to create document')
+    }
+  }
+
+  const uploadFiles = async (files: FileList | null) => {
+    if (!projectId || !files?.length) return
+    setUploading(true)
+    try {
+      for (const file of Array.from(files)) {
+        const r = await docsApi.upload(projectId, file)
+        upsertDocument(r.data)
+      }
+    } finally {
+      setUploading(false)
     }
   }
 
@@ -190,6 +206,17 @@ export default function ProjectPage() {
             <Users size={14} /> Members ({members.length})
           </button>
           {canEdit && (
+            <label style={{ ...ghostBtn, cursor: uploading ? 'wait' : 'pointer' }}>
+              <Upload size={14} /> {uploading ? 'Uploading…' : 'Upload files'}
+              <input
+                type="file"
+                multiple
+                onChange={(e) => void uploadFiles(e.target.files)}
+                style={{ display: 'none' }}
+              />
+            </label>
+          )}
+          {canEdit && (
             <button onClick={() => setCreatingDoc(true)} style={primaryBtn}>
               <FilePlus size={14} /> New document
             </button>
@@ -210,7 +237,7 @@ export default function ProjectPage() {
             <div style={{ ...card, marginBottom: 16 }}>
               <input
                 autoFocus
-                placeholder="Document title"
+                placeholder="File path (e.g. src/app.py)"
                 value={newDocTitle}
                 onChange={(e) => setNewDocTitle(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && createDoc()}
@@ -249,11 +276,22 @@ export default function ProjectPage() {
                     <FileText size={16} color="#818cf8" />
                     <div>
                       <div style={{ fontWeight: 600, fontSize: 14 }}>{doc.title}</div>
+                      <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>{doc.path}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+                        <span style={{
+                          fontSize: 10, padding: '2px 6px', borderRadius: 999,
+                          background: doc.kind === 'latex' ? '#312e81' : '#164e63',
+                          color: doc.kind === 'latex' ? '#c7d2fe' : '#a5f3fc',
+                          textTransform: 'uppercase', letterSpacing: 0.4,
+                        }}>
+                          {doc.kind}
+                        </span>
                       {doc.updated_at && (
-                        <div style={{ fontSize: 11, color: '#4a4a6a', marginTop: 2 }}>
+                        <div style={{ fontSize: 11, color: '#4a4a6a' }}>
                           Updated {new Date(doc.updated_at).toLocaleDateString()}
                         </div>
                       )}
+                      </div>
                     </div>
                   </div>
                   {canEdit && (

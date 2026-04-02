@@ -48,6 +48,8 @@ async def _get_doc(project_id: str, doc_id: str, db: AsyncSession) -> Document:
     doc = res.scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
+    if doc.kind == "uploaded":
+        raise HTTPException(status_code=400, detail="Version history is not available for binary uploaded files")
     return doc
 
 

@@ -1,14 +1,15 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
-import { docsApi } from '../services/api'
-import { RoomSocket, TextOp } from '../services/socket'
-import { useStore, Presence } from '../store/useStore'
-import Editor from '../components/Editor'
-import Preview from '../components/Preview'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
 import AIChat from '../components/AIChat'
+import AssetViewer from '../components/AssetViewer'
+import Editor from '../components/Editor'
 import FileTree from '../components/FileTree'
+import Preview from '../components/Preview'
 import Toolbar from '../components/Toolbar'
 import VersionHistoryPanel from '../components/VersionHistoryPanel'
+import { docsApi } from '../services/api'
+import { RoomSocket, TextOp } from '../services/socket'
+import { Presence, useStore } from '../store/useStore'
 
 interface RemoteCursor {
   color: string
@@ -29,17 +30,14 @@ export default function EditorPage() {
   const { projectId, docId } = useParams<{ projectId: string; docId: string }>()
   const navigate = useNavigate()
   const {
-    token, currentDoc, currentProject,
-    setCurrentDoc, setPresence, setConnected,
+    token, currentDoc, setCurrentDoc, setPresence, setConnected,
     updateDocContent, updateDocSyncState, updateDocTitle, setCompiledPdf,
-    isConnected,
-    user,
+    isConnected, user,
   } = useStore()
 
   const socketRef = useRef<RoomSocket | null>(null)
   const opApplierRef = useRef<((ops: TextOp[]) => boolean) | null>(null)
   const textInserterRef = useRef<((text: string) => void) | null>(null)
-  const getCursorPosRef = useRef<(() => { lineNumber: number; column: number } | null) | null>(null)
   const currentDocRef = useRef(currentDoc)
 
   const [showAI, setShowAI] = useState(true)
@@ -60,7 +58,50 @@ export default function EditorPage() {
     currentDocRef.current = currentDoc
   }, [currentDoc])
 
+  const isLatexDoc = currentDoc?.kind === 'latex'
+  const isEditableDoc = currentDoc?.kind === 'latex' || currentDoc?.kind === 'text'
+  const editorLanguage = (() => {
+    const path = currentDoc?.path || currentDoc?.title || ''
+    const ext = path.split('.').pop()?.toLowerCase()
+    switch (ext) {
+      case 'tex':
+      case 'ltx':
+      case 'latex':
+        return 'latex'
+      case 'py':
+        return 'python'
+      case 'js':
+      case 'jsx':
+        return 'javascript'
+      case 'ts':
+      case 'tsx':
+        return 'typescript'
+      case 'md':
+      case 'markdown':
+        return 'markdown'
+      case 'json':
+        return 'json'
+      case 'yml':
+      case 'yaml':
+        return 'yaml'
+      case 'html':
+        return 'html'
+      case 'css':
+      case 'scss':
+        return 'css'
+      case 'sh':
+      case 'bash':
+      case 'zsh':
+        return 'shell'
+      case 'xml':
+        return 'xml'
+      default:
+        return 'plaintext'
+    }
+  })()
+
   const handleLocalDocumentChange = useCallback((content: string) => {
+    if (currentDocRef.current?.kind === 'uploaded') return
     const socket = socketRef.current
     const baseRevision = currentDocRef.current?.content_revision ?? 0
     if (socket?.isOpen()) {
@@ -80,13 +121,23 @@ export default function EditorPage() {
     docsApi.get(projectId, docId)
       .then((res) => {
         setCurrentDoc(res.data)
-        setCompiledPdf(res.data.compile_success ? res.data.compile_pdf_base64 : null, res.data.compile_log || '')
+        if (res.data.kind === 'latex') {
+          setCompiledPdf(res.data.compile_success ? res.data.compile_pdf_base64 : null, res.data.compile_log || '')
+        } else {
+          setCompiledPdf(null, '')
+        }
       })
       .catch(() => navigate(`/projects/${projectId}`))
   }, [projectId, docId, navigate, setCompiledPdf, setCurrentDoc])
 
   useEffect(() => {
-    if (!docId || !token) return
+    if (!docId || !token || !isEditableDoc) {
+      setConnected(false)
+      setPresence([])
+      setReadOnly(currentDoc?.kind === 'uploaded')
+      setRemoteDecorations(new Map())
+      return
+    }
 
     const socket = new RoomSocket(docId, token)
     socketRef.current = socket
@@ -119,7 +170,6 @@ export default function EditorPage() {
         } else {
           socket.clearPendingDraft()
         }
-        // Restore last known cursor positions for all currently connected users
         if (msg.cursors) {
           const restored = new Map<string, RemoteCursor>()
           for (const [uid, data] of Object.entries(msg.cursors as Record<string, any>)) {
@@ -187,23 +237,34 @@ export default function EditorPage() {
       setConnected(false)
       socketRef.current = null
     }
-  }, [docId, token, setConnected, setPresence, updateDocContent, updateDocSyncState, updateDocTitle, setCompiledPdf])
+  }, [docId, token, isEditableDoc, currentDoc?.kind, setConnected, setPresence, updateDocContent, updateDocSyncState, updateDocTitle, setCompiledPdf])
+
+  useEffect(() => {
+    if (!isEditableDoc) {
+      setShowVersionHistory(false)
+    }
+    if (!isLatexDoc) {
+      setPickingEquationLocation(false)
+      setEquationLocation(null)
+      setQuoteForChat(null)
+      setReconcileState(null)
+    }
+  }, [isEditableDoc, isLatexDoc])
 
   const handleOwnCursorMove = useCallback((pos: { lineNumber: number; column: number }) => {
     setLocalCursorPos(pos)
-    if (!user) return
-    // Show own cursor with label in the editor decorations
+    if (!user || !isEditableDoc) return
     setRemoteDecorations((prev) => {
       const next = new Map(prev)
       next.set(`own-${user.id}`, {
-        color: '#4f46e5',  // indigo for own cursor
+        color: '#4f46e5',
         username: user.username,
         lineNumber: pos.lineNumber,
         column: pos.column,
       })
       return next
     })
-  }, [user])
+  }, [user, isEditableDoc])
 
   const startDragPreview = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -253,9 +314,11 @@ export default function EditorPage() {
         onToggleVersionHistory={() => setShowVersionHistory((v) => !v)}
         projectId={projectId}
         readOnly={readOnly}
+        isLatexDoc={isLatexDoc}
+        isEditableDoc={isEditableDoc}
       />
 
-      {(!readOnly && !isConnected) && (
+      {isEditableDoc && (!readOnly && !isConnected) && (
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           gap: 12, padding: '8px 14px', background: '#3f1d2e', borderBottom: '1px solid #6b2147',
@@ -268,7 +331,7 @@ export default function EditorPage() {
         </div>
       )}
 
-      {reconcileState && (
+      {isEditableDoc && reconcileState && (
         <div style={{
           display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px',
           background: '#3a2a12', borderBottom: '1px solid #7c5b14', color: '#fde68a', fontSize: 12,
@@ -310,29 +373,33 @@ export default function EditorPage() {
       )}
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-        <div style={{ width: 200, flexShrink: 0, borderRight: '1px solid #1e1e3a', overflow: 'hidden' }}>
+        <div style={{ width: 240, flexShrink: 0, borderRight: '1px solid #1e1e3a', overflow: 'hidden' }}>
           <FileTree projectId={projectId} />
         </div>
 
         <div style={{ flex: 1, overflow: 'hidden', minWidth: 0 }}>
-          <Editor
-            socket={socketRef.current}
-            readOnly={readOnly}
-            remoteDecorations={remoteDecorations}
-            onRegisterOpApplier={(fn) => { opApplierRef.current = fn }}
-            onRegisterTextInserter={(fn) => { textInserterRef.current = fn }}
-            onRegisterGetCursorPos={(fn) => { getCursorPosRef.current = fn }}
-            onCursorMove={handleOwnCursorMove}
-            onSelectionQuote={(q) => setQuoteForChat(q)}
-            onLocalDocumentChange={handleLocalDocumentChange}
-            pickingLocation={pickingEquationLocation}
-            onLocationPicked={(loc) => { setEquationLocation(loc); setPickingEquationLocation(false) }}
-            ownUsername={user?.username}
-            ownColor="#4f46e5"
-          />
+          {isEditableDoc ? (
+            <Editor
+              socket={socketRef.current}
+              readOnly={readOnly}
+              remoteDecorations={remoteDecorations}
+              onRegisterOpApplier={(fn) => { opApplierRef.current = fn }}
+              onRegisterTextInserter={(fn) => { textInserterRef.current = fn }}
+              onCursorMove={handleOwnCursorMove}
+              onSelectionQuote={(q) => setQuoteForChat(q)}
+              onLocalDocumentChange={handleLocalDocumentChange}
+              pickingLocation={pickingEquationLocation}
+              onLocationPicked={(loc) => { setEquationLocation(loc); setPickingEquationLocation(false) }}
+              ownUsername={user?.username}
+              ownColor="#4f46e5"
+              language={editorLanguage}
+            />
+          ) : (
+            <AssetViewer projectId={projectId} />
+          )}
         </div>
 
-        {showPreview && (
+        {isLatexDoc && showPreview && (
           <>
             <div
               onMouseDown={startDragPreview}
@@ -346,7 +413,7 @@ export default function EditorPage() {
           </>
         )}
 
-        {showAI && (
+        {isLatexDoc && showAI && (
           <>
             <div
               onMouseDown={startDragAI}
@@ -383,7 +450,7 @@ export default function EditorPage() {
         )}
       </div>
 
-      {showVersionHistory && projectId && docId && (
+      {isEditableDoc && showVersionHistory && projectId && docId && (
         <VersionHistoryPanel
           projectId={projectId}
           docId={docId}

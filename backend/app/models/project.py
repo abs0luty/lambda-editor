@@ -21,6 +21,9 @@ class Project(Base):
     documents: Mapped[list["Document"]] = relationship(
         "Document", back_populates="project", cascade="all, delete-orphan"
     )
+    folders: Mapped[list["Folder"]] = relationship(
+        "Folder", back_populates="project", cascade="all, delete-orphan"
+    )
     invites: Mapped[list["ProjectInvite"]] = relationship(
         "ProjectInvite", back_populates="project", cascade="all, delete-orphan"
     )
@@ -55,3 +58,16 @@ class ProjectInvite(Base):
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
 
     project: Mapped["Project"] = relationship("Project", back_populates="invites")
+
+
+class Folder(Base):
+    __tablename__ = "folders"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    path: Mapped[str] = mapped_column(String, nullable=False)
+    project_id: Mapped[str] = mapped_column(String, ForeignKey("projects.id"), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+
+    project: Mapped["Project"] = relationship("Project", back_populates="folders")
+    owner: Mapped["User"] = relationship("User")

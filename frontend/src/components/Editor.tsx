@@ -27,6 +27,7 @@ interface Props {
   onLocationPicked?: (loc: { line: number; text: string; beforeText: string; afterText: string }) => void
   ownUsername?: string
   ownColor?: string
+  language?: string
 }
 
 interface SelectionPopup {
@@ -47,7 +48,7 @@ const LATEX_SNIPPETS = [
   { label: '\\int', insertText: '\\int_{$1}^{$2}' },
 ]
 
-export default function Editor({ socket, readOnly, remoteDecorations, onRegisterOpApplier, onRegisterTextInserter, onRegisterGetCursorPos, onCursorMove, onSelectionQuote, onLocalDocumentChange, pickingLocation, onLocationPicked, ownUsername, ownColor }: Props) {
+export default function Editor({ socket, readOnly, remoteDecorations, onRegisterOpApplier, onRegisterTextInserter, onRegisterGetCursorPos, onCursorMove, onSelectionQuote, onLocalDocumentChange, pickingLocation, onLocationPicked, ownUsername, ownColor, language = 'plaintext' }: Props) {
   const { currentDoc, updateDocContent } = useStore()
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<typeof Monaco | null>(null)
@@ -302,7 +303,7 @@ export default function Editor({ socket, readOnly, remoteDecorations, onRegister
     <div style={{ height: '100%', width: '100%', position: 'relative' }}>
       <MonacoEditor
         height="100%"
-        language="latex"
+        language={language}
         theme="vs-dark"
         value={currentDoc?.content ?? ''}
         onChange={handleChange}
