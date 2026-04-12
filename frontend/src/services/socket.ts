@@ -1,3 +1,5 @@
+import { wsUrl } from '../config'
+
 type MessageHandler = (msg: Record<string, unknown>) => void
 
 export class RoomSocket {
@@ -16,7 +18,7 @@ export class RoomSocket {
   connect() {
     if (this.destroyed) return
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return
-    const url = `ws://${window.location.hostname}:8000/ws/${this.roomId}`
+    const url = wsUrl(`/ws/${this.roomId}`)
     this.ws = new WebSocket(url)
 
     this.ws.onopen = () => {
@@ -120,7 +122,7 @@ export class ProjectSocket {
   connect() {
     if (this.destroyed) return
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return
-    const url = `ws://${window.location.hostname}:8000/ws/project/${this.projectId}`
+    const url = wsUrl(`/ws/project/${this.projectId}`)
     this.ws = new WebSocket(url)
 
     this.ws.onopen = () => {

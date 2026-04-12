@@ -9,6 +9,7 @@ import FileTree from '../components/FileTree'
 import Preview from '../components/Preview'
 import Toolbar from '../components/Toolbar'
 import VersionHistoryPanel from '../components/VersionHistoryPanel'
+import { WS_BASE_URL } from '../config'
 import { docsApi } from '../services/api'
 import { RoomSocket } from '../services/socket'
 import { Presence, useStore } from '../store/useStore'
@@ -190,7 +191,7 @@ export default function EditorPage() {
     let observerFn: (() => void) | null = null
 
     const provider = new WebsocketProvider(
-      `ws://${window.location.hostname}:8000`,
+      WS_BASE_URL,
       `ws/${docId}/sync`,
       doc
     )

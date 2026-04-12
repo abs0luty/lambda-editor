@@ -77,6 +77,7 @@ REFRESH_TOKEN_COOKIE_NAME=lambda_refresh_token
 ACCESS_TOKEN_TTL_SECONDS=900
 REFRESH_TOKEN_TTL_SECONDS=604800
 AUTH_COOKIE_SECURE=false
+AUTH_COOKIE_SAMESITE=lax
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o
 OPENAI_BASE_URL=https://api.openai.com/v1
@@ -105,7 +106,15 @@ This creates the current application tables in PostgreSQL: `users`, `projects`, 
 ```bash
 cd frontend
 npm install
+cp .env.example .env.local
 npm run dev
+```
+
+`frontend/.env.local` is optional for local development because Vite proxies `/api` to the backend by default. Use it when the frontend needs to talk to a deployed backend directly:
+
+```env
+VITE_API_BASE_URL=https://your-backend.example.com
+VITE_WS_BASE_URL=wss://your-backend.example.com
 ```
 
 ### 3. One-command startup
@@ -124,6 +133,33 @@ This script:
 - starts FastAPI on port `8000`
 - starts Vite on port `5173`
 - prints the database, cache, app, and API docs URLs
+
+## Vercel Frontend Deployment
+
+For a split deployment, the easiest shape is:
+
+- frontend on Vercel
+- backend on a service that supports long-lived WebSockets and Redis/PostgreSQL connectivity
+
+The frontend no longer assumes the backend lives on the same origin. For a Vercel deployment:
+
+1. Set the Vercel project root directory to `frontend`
+2. Add these frontend environment variables in Vercel:
+
+```env
+VITE_API_BASE_URL=https://your-backend.example.com
+VITE_WS_BASE_URL=wss://your-backend.example.com
+```
+
+3. Update the backend environment so browser auth cookies can be used from the deployed frontend:
+
+```env
+AUTH_COOKIE_SECURE=true
+AUTH_COOKIE_SAMESITE=none
+CORS_ORIGINS=https://your-frontend.vercel.app
+```
+
+`frontend/vercel.json` includes a SPA rewrite so deep links such as `/projects/:projectId/docs/:docId` resolve to the React app correctly.
 
 ## Implementation Notes
 

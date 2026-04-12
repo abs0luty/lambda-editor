@@ -149,7 +149,7 @@ def _set_auth_cookies(response: Response, access_token: str, refresh_token: str)
         value=access_token,
         max_age=settings.ACCESS_TOKEN_TTL_SECONDS,
         httponly=True,
-        samesite="lax",
+        samesite=settings.AUTH_COOKIE_SAMESITE,
         secure=settings.AUTH_COOKIE_SECURE,
         path="/",
     )
@@ -158,7 +158,7 @@ def _set_auth_cookies(response: Response, access_token: str, refresh_token: str)
         value=refresh_token,
         max_age=settings.REFRESH_TOKEN_TTL_SECONDS,
         httponly=True,
-        samesite="lax",
+        samesite=settings.AUTH_COOKIE_SAMESITE,
         secure=settings.AUTH_COOKIE_SECURE,
         path="/",
     )
