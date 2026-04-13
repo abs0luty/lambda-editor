@@ -238,7 +238,7 @@ export default function EditorPage() {
     setRemoteDecorations((prev) => {
       const next = new Map(prev)
       next.set(`own-${user.id}`, {
-        color: '#4f46e5',
+        color: C.accent,
         username: user.username,
         lineNumber: pos.lineNumber,
         column: pos.column,
@@ -331,7 +331,7 @@ export default function EditorPage() {
               pickingLocation={pickingEquationLocation}
               onLocationPicked={(loc) => { setEquationLocation(loc); setPickingEquationLocation(false) }}
               ownUsername={user?.username}
-              ownColor="#4f46e5"
+              ownColor={C.accent}
               language={editorLanguage}
             />
           ) : (

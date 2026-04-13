@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import type { ThemeMode } from '../design'
 
 export interface User {
   id: string
@@ -47,10 +48,25 @@ export interface TypingUser {
   username: string
 }
 
+const THEME_STORAGE_KEY = 'theme'
+
+function getInitialTheme(): ThemeMode {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY)
+    if (stored === 'light' || stored === 'dark') return stored
+  } catch {}
+
+  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: light)').matches) {
+    return 'light'
+  }
+  return 'dark'
+}
+
 interface AppState {
   user: User | null
   token: string | null
   authReady: boolean
+  theme: ThemeMode
   projects: Project[]
   currentProject: Project | null
   documents: Document[]
@@ -65,6 +81,8 @@ interface AppState {
 
   setUser: (user: User | null, token: string | null) => void
   setAuthReady: (ready: boolean) => void
+  setTheme: (theme: ThemeMode) => void
+  toggleTheme: () => void
   setProjects: (projects: Project[]) => void
   setCurrentProject: (p: Project | null) => void
   setDocuments: (docs: Document[]) => void
@@ -90,6 +108,7 @@ export const useStore = create<AppState>((set) => ({
   })(),
   token: localStorage.getItem('token'),
   authReady: false,
+  theme: getInitialTheme(),
   projects: [],
   currentProject: null,
   documents: [],
@@ -113,6 +132,15 @@ export const useStore = create<AppState>((set) => ({
     set({ user, token })
   },
   setAuthReady: (authReady) => set({ authReady }),
+  setTheme: (theme) => {
+    localStorage.setItem(THEME_STORAGE_KEY, theme)
+    set({ theme })
+  },
+  toggleTheme: () => set((s) => {
+    const theme = s.theme === 'dark' ? 'light' : 'dark'
+    localStorage.setItem(THEME_STORAGE_KEY, theme)
+    return { theme }
+  }),
   setProjects: (projects) => set({ projects }),
   setCurrentProject: (currentProject) => set({ currentProject }),
   setDocuments: (documents) => set({ documents }),

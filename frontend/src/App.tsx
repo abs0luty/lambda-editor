@@ -6,6 +6,7 @@ import ProjectsPage from './pages/ProjectsPage'
 import ProjectPage from './pages/ProjectPage'
 import EditorPage from './pages/EditorPage'
 import { authApi, projectsApi, refreshAuthSession } from './services/api'
+import { C, applyTheme } from './design'
 
 function FullPageMessage({ message }: { message: string }) {
   return (
@@ -14,8 +15,8 @@ function FullPageMessage({ message }: { message: string }) {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      background: '#0f0f23',
-      color: '#9ca3af',
+      background: C.bgBase,
+      color: C.textSecondary,
       fontSize: 14,
     }}>
       {message}
@@ -90,10 +91,20 @@ function JoinPage() {
       .catch(() => { window.location.href = '/projects' })
   }, [inviteToken, authToken])
 
-  return <div style={{ color: '#e2e8f0', padding: 40, textAlign: 'center' }}>Joining project…</div>
+  return (
+    <div style={{ minHeight: '100vh', background: C.bgBase, color: C.textPrimary, padding: 40, textAlign: 'center' }}>
+      Joining project…
+    </div>
+  )
 }
 
 export default function App() {
+  const theme = useStore((s) => s.theme)
+
+  useEffect(() => {
+    applyTheme(theme)
+  }, [theme])
+
   return (
     <BrowserRouter>
       <AuthBootstrap>
