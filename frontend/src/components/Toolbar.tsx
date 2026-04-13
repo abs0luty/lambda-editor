@@ -151,6 +151,14 @@ export default function Toolbar({
     setMembers((prev) => prev.filter((m) => m.user_id !== memberId))
   }
 
+  const signOut = async () => {
+    try {
+      await authApi.logout()
+    } finally {
+      logout()
+    }
+  }
+
   const isOwner = currentProject?.my_role === 'owner'
 
   return (

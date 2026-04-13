@@ -54,6 +54,14 @@ export default function ProjectsPage() {
     }
   }
 
+  const signOut = async () => {
+    try {
+      await authApi.logout()
+    } finally {
+      logout()
+    }
+  }
+
   return (
     <div style={{ minHeight: '100vh', background: C.bgBase, color: C.textPrimary }}>
       {/* Top nav */}

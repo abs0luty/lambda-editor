@@ -50,6 +50,7 @@ export interface TypingUser {
 interface AppState {
   user: User | null
   token: string | null
+  authReady: boolean
   projects: Project[]
   currentProject: Project | null
   documents: Document[]
@@ -63,6 +64,7 @@ interface AppState {
   typingUsers: TypingUser[]
 
   setUser: (user: User | null, token: string | null) => void
+  setAuthReady: (ready: boolean) => void
   setProjects: (projects: Project[]) => void
   setCurrentProject: (p: Project | null) => void
   setDocuments: (docs: Document[]) => void
@@ -87,6 +89,7 @@ export const useStore = create<AppState>((set) => ({
     try { return JSON.parse(localStorage.getItem('user') || 'null') } catch { return null }
   })(),
   token: localStorage.getItem('token'),
+  authReady: false,
   projects: [],
   currentProject: null,
   documents: [],
@@ -103,9 +106,13 @@ export const useStore = create<AppState>((set) => ({
     if (user && token) {
       localStorage.setItem('user', JSON.stringify(user))
       localStorage.setItem('token', token)
+    } else {
+      localStorage.removeItem('token')
+      localStorage.removeItem('user')
     }
     set({ user, token })
   },
+  setAuthReady: (authReady) => set({ authReady }),
   setProjects: (projects) => set({ projects }),
   setCurrentProject: (currentProject) => set({ currentProject }),
   setDocuments: (documents) => set({ documents }),
@@ -146,6 +153,14 @@ export const useStore = create<AppState>((set) => ({
   logout: () => {
     localStorage.removeItem('token')
     localStorage.removeItem('user')
-    set({ user: null, token: null, projects: [], currentProject: null, documents: [], currentDoc: null })
+    set({
+      user: null,
+      token: null,
+      authReady: true,
+      projects: [],
+      currentProject: null,
+      documents: [],
+      currentDoc: null,
+    })
   },
 }))
