@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { FolderOpen, Plus, Trash2, LogOut, Users, ArrowRight, Loader2, Link } from 'lucide-react'
-import { projectsApi } from '../services/api'
+import { authApi, projectsApi } from '../services/api'
 import { useStore } from '../store/useStore'
 import { C } from '../design'
 

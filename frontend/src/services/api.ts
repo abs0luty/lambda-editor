@@ -175,22 +175,22 @@ export async function streamAI(
   onError: (err: string) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  const makeRequest = () => fetch(`/api${endpoint}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+
   let res: Response
   try {
-    res = await fetch(`/api${endpoint}`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal,
-    })
+    res = await makeRequest()
   } catch (err: any) {
     if (err?.name === 'AbortError') { onDone(); return }
     onError(`Request failed: ${err?.message ?? 'network error'}`)
     return
   }
-
-  let res = await makeRequest()
 
   if (res.status === 401) {
     try {

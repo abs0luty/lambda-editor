@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Save, Wifi, WifiOff, Loader2, History, ArrowLeft, Bot, Eye, Lock, Link, Copy, Check, Trash2, Plus, X, Users, UserPlus, CloudOff, Cloud } from 'lucide-react'
 import { useStore, Presence } from '../store/useStore'
-import { docsApi, projectsApi } from '../services/api'
+import { authApi, docsApi, projectsApi } from '../services/api'
 import { C } from '../design'
 
 interface Props {

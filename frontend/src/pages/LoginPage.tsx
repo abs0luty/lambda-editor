@@ -1,5 +1,5 @@
-import { useState, FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useState, FormEvent } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import { authApi } from '../services/api'
 import { useStore } from '../store/useStore'
@@ -34,8 +34,9 @@ export default function LoginPage() {
       } else {
         res = await authApi.login(email, password)
       }
-      setUser(res.data.user, 'session')
-      navigate('/projects')
+      const { user } = res.data
+      setUser(user, 'session')
+      navigate(nextPath, { replace: true })
     } catch (err: any) {
       setError(err?.response?.data?.detail || 'Something went wrong')
     } finally {
@@ -92,7 +93,7 @@ export default function LoginPage() {
                 boxShadow: mode === m ? '0 1px 4px rgba(0,0,0,0.35)' : 'none',
                 fontFamily: 'inherit',
               }}>
-                {m === 'login' ? 'Sign in' : 'Create account'}
+                {m === 'login' ? 'Sign In' : 'Register'}
               </button>
             ))}
           </div>
@@ -101,7 +102,7 @@ export default function LoginPage() {
             <div>
               <label style={labelSt}>Email</label>
               <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-                required style={inputSt} placeholder="you@university.edu" />
+                required style={inputSt} placeholder="you@example.com" />
             </div>
 
             {mode === 'register' && (
@@ -136,7 +137,7 @@ export default function LoginPage() {
               transition: 'background 0.15s', fontFamily: 'inherit',
             }}>
               {loading && <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />}
-              {loading ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Create account'}
+              {loading ? 'Please wait…' : mode === 'login' ? 'Sign In' : 'Create Account'}
             </button>
           </form>
         </div>
