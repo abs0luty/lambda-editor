@@ -6,4 +6,7 @@ backend/venv/
 frontend/dist
 __pycache__/
 *.pyc
-.vercel
+.DS_Store
+*.pdf
+*.docx
+.vercel/
