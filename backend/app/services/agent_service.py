@@ -58,15 +58,6 @@ def _function_tool(
     description: str,
     parameters: dict[str, Any],
 ) -> dict[str, Any]:
-    if settings.llm_provider == "groq":
-        return {
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": description,
-                "parameters": parameters,
-            },
-        }
     return {
         "type": "function",
         "name": name,

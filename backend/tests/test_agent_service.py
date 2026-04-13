@@ -19,7 +19,7 @@ def test_openai_function_tool_uses_flat_shape(monkeypatch):
     }
 
 
-def test_groq_function_tool_uses_nested_shape(monkeypatch):
+def test_groq_function_tool_uses_flat_shape(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "groq")
 
     tool = agent_service._function_tool(  # noqa: SLF001
@@ -30,11 +30,9 @@ def test_groq_function_tool_uses_nested_shape(monkeypatch):
 
     assert tool == {
         "type": "function",
-        "function": {
-            "name": "research_topic",
-            "description": "Research docs.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
+        "name": "research_topic",
+        "description": "Research docs.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
     }
 
 
