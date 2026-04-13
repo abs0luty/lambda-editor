@@ -40,6 +40,13 @@ export interface Presence {
   read_only?: boolean
 }
 
+export type SaveStatus = 'idle' | 'saving' | 'saved'
+
+export interface TypingUser {
+  user_id: string
+  username: string
+}
+
 interface AppState {
   user: User | null
   token: string | null
@@ -53,6 +60,8 @@ interface AppState {
   compiledPdf: string | null
   compileLog: string
   isCompiling: boolean
+  saveStatus: SaveStatus
+  typingUsers: TypingUser[]
 
   setUser: (user: User | null, token: string | null) => void
   setAuthReady: (ready: boolean) => void
@@ -69,6 +78,9 @@ interface AppState {
   setConnected: (v: boolean) => void
   setCompiledPdf: (pdf: string | null, log: string) => void
   setCompiling: (v: boolean) => void
+  setSaveStatus: (status: SaveStatus) => void
+  setTypingUser: (user: TypingUser, isTyping: boolean) => void
+  clearTypingUsers: () => void
   logout: () => void
 }
 
@@ -87,6 +99,8 @@ export const useStore = create<AppState>((set) => ({
   compiledPdf: null,
   compileLog: '',
   isCompiling: false,
+  saveStatus: 'idle',
+  typingUsers: [],
 
   setUser: (user, token) => {
     if (user && token) {
@@ -127,6 +141,15 @@ export const useStore = create<AppState>((set) => ({
   setConnected: (isConnected) => set({ isConnected }),
   setCompiledPdf: (compiledPdf, compileLog) => set({ compiledPdf, compileLog }),
   setCompiling: (isCompiling) => set({ isCompiling }),
+  setSaveStatus: (saveStatus) => set({ saveStatus }),
+  setTypingUser: (user, isTyping) => set((s) => {
+    if (isTyping) {
+      const already = s.typingUsers.some((u) => u.user_id === user.user_id)
+      return already ? {} : { typingUsers: [...s.typingUsers, user] }
+    }
+    return { typingUsers: s.typingUsers.filter((u) => u.user_id !== user.user_id) }
+  }),
+  clearTypingUsers: () => set({ typingUsers: [] }),
   logout: () => {
     localStorage.removeItem('token')
     localStorage.removeItem('user')
