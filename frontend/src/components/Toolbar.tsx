@@ -4,6 +4,7 @@ import { Save, Wifi, WifiOff, Loader2, History, ArrowLeft, Bot, Eye, Lock, Link,
 import { useStore, Presence } from '../store/useStore'
 import { authApi, docsApi, projectsApi } from '../services/api'
 import { C } from '../design'
+import ThemeToggle from './ThemeToggle'
 
 interface Props {
   onToggleAI: () => void
@@ -316,6 +317,7 @@ export default function Toolbar({
 
         {/* User */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginLeft: 4 }}>
+          <ThemeToggle compact />
           <div style={{
             width: 24, height: 24, borderRadius: '50%',
             background: `linear-gradient(135deg, ${C.accent}, ${C.lambda})`,
