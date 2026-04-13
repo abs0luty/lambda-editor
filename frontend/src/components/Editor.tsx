@@ -6,6 +6,7 @@ import { MonacoBinding } from 'y-monaco'
 import { useStore } from '../store/useStore'
 import { RoomSocket } from '../services/socket'
 import { FileText, Quote, MapPin } from 'lucide-react'
+import { C, getMonacoTheme } from '../design'
 
 interface RemoteCursor {
   color: string
@@ -50,7 +51,7 @@ const LATEX_SNIPPETS = [
 ]
 
 export default function Editor({ socket, ydoc, readOnly, remoteDecorations, onRegisterTextInserter, onRegisterGetCursorPos, onCursorMove, onSelectionQuote, pickingLocation, onLocationPicked, ownUsername, ownColor, language = 'plaintext' }: Props) {
-  const { currentDoc, updateDocContent, setSaveStatus } = useStore()
+  const { currentDoc, updateDocContent, setSaveStatus, theme } = useStore()
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<typeof Monaco | null>(null)
   const isRemoteUpdate = useRef(false)
@@ -335,7 +336,7 @@ export default function Editor({ socket, ydoc, readOnly, remoteDecorations, onRe
       <MonacoEditor
         height="100%"
         language={language}
-        theme="vs-dark"
+        theme={getMonacoTheme(theme)}
         value={currentDoc?.content ?? ''}
         onChange={handleChange}
         onMount={handleMount}
@@ -359,12 +360,12 @@ export default function Editor({ socket, ydoc, readOnly, remoteDecorations, onRe
       {pickingLocation && (
         <div style={{
           position: 'absolute', top: 0, left: 0, right: 0, zIndex: 20,
-          background: '#78350f', borderBottom: '2px solid #fbbf24',
+          background: C.yellowSubtle, borderBottom: `2px solid ${C.yellow}`,
           padding: '7px 14px', display: 'flex', alignItems: 'center', gap: 8,
           pointerEvents: 'none',
         }}>
-          <MapPin size={13} color="#fbbf24" />
-          <span style={{ fontSize: 12, color: '#fde68a', fontWeight: 600 }}>
+          <MapPin size={13} color={C.yellow} />
+          <span style={{ fontSize: 12, color: C.yellow, fontWeight: 600 }}>
             Click anywhere in the document to set the equation insertion point
           </span>
         </div>
@@ -380,8 +381,8 @@ export default function Editor({ socket, ydoc, readOnly, remoteDecorations, onRe
             display: 'flex',
             alignItems: 'center',
             gap: 6,
-            background: '#1e1e3a',
-            border: '1px solid #4f46e5',
+            background: C.bgCard,
+            border: `1px solid ${C.accentBorder}`,
             borderRadius: 6,
             padding: '4px 10px',
             boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
@@ -390,15 +391,15 @@ export default function Editor({ socket, ydoc, readOnly, remoteDecorations, onRe
           // Preserve the selected range so quoting still has access to the original text.
           onMouseDown={(e) => e.preventDefault()}
         >
-          <FileText size={11} color="#818cf8" />
-          <span style={{ fontSize: 11, color: '#6b7280' }}>
+          <FileText size={11} color={C.accent} />
+          <span style={{ fontSize: 11, color: C.textSecondary }}>
             L{selPopup.lineStart}{selPopup.lineEnd !== selPopup.lineStart ? `–${selPopup.lineEnd}` : ''}
           </span>
           <button
             onClick={handleQuote}
             style={{
               display: 'flex', alignItems: 'center', gap: 4,
-              background: '#4f46e5', border: 'none', borderRadius: 4,
+              background: C.accent, border: 'none', borderRadius: 4,
               color: '#fff', fontSize: 11, fontWeight: 600,
               padding: '2px 8px', cursor: 'pointer',
             }}

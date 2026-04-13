@@ -4,6 +4,7 @@ import { Loader2 } from 'lucide-react'
 import { authApi } from '../services/api'
 import { useStore } from '../store/useStore'
 import { C } from '../design'
+import ThemeToggle from '../components/ThemeToggle'
 
 export default function LoginPage() {
   const [mode, setMode] = useState<'login' | 'register'>('login')
@@ -49,7 +50,11 @@ export default function LoginPage() {
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       minHeight: '100vh', background: C.bgBase,
       backgroundImage: 'radial-gradient(ellipse 80% 50% at 50% -20%, rgba(124,106,246,0.07), transparent)',
+      position: 'relative',
     }}>
+      <div style={{ position: 'fixed', top: 18, right: 18 }}>
+        <ThemeToggle />
+      </div>
       <div style={{ width: 400, animation: 'fadeIn 0.3s ease' }}>
         {/* Brand mark */}
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
@@ -147,11 +152,11 @@ export default function LoginPage() {
 }
 
 const labelSt: React.CSSProperties = {
-  display: 'block', fontSize: 12, color: '#5e5e72', marginBottom: 5, fontWeight: 500,
+  display: 'block', fontSize: 12, color: C.textSecondary, marginBottom: 5, fontWeight: 500,
 }
 const inputSt: React.CSSProperties = {
-  width: '100%', background: 'rgba(255,255,255,0.025)',
-  border: '1px solid rgba(255,255,255,0.07)',
-  borderRadius: 7, padding: '9px 12px', color: '#ececf1', fontSize: 13,
+  width: '100%', background: C.bgBase,
+  border: `1px solid ${C.border}`,
+  borderRadius: 7, padding: '9px 12px', color: C.textPrimary, fontSize: 13,
   outline: 'none', boxSizing: 'border-box', fontFamily: 'inherit',
 }

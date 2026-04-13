@@ -4,6 +4,7 @@ import { FolderOpen, Plus, Trash2, LogOut, Users, ArrowRight, Loader2, Link } fr
 import { authApi, projectsApi } from '../services/api'
 import { useStore } from '../store/useStore'
 import { C } from '../design'
+import ThemeToggle from '../components/ThemeToggle'
 
 export default function ProjectsPage() {
   const { user, projects, setProjects, logout } = useStore()
@@ -92,7 +93,8 @@ export default function ProjectsPage() {
             </div>
             <span style={{ fontSize: 12, color: C.textSecondary }}>{user?.username}</span>
           </div>
-          <button onClick={logout} style={ghostSt}>
+          <ThemeToggle compact />
+          <button onClick={signOut} style={ghostSt}>
             <LogOut size={12} /> Sign out
           </button>
         </div>
