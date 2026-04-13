@@ -1,12 +1,15 @@
 services:
   - type: web
-    runtime: docker
+    runtime: python
     name: lambda-backend
+    rootDir: backend
     plan: free
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: .
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
-    envVars:
+    envVars: &backendEnv
+      - key: PYTHON_VERSION
+        value: 3.12.13
       - key: SECRET_KEY
         generateValue: true
       - key: DATABASE_URL
@@ -46,6 +49,15 @@ services:
         sync: false
       - key: GOOGLE_TRANSLATE_SOURCE_LANGUAGE
         value: auto
+
+  - type: web
+    runtime: docker
+    name: lambda-backend-docker
+    plan: free
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars: *backendEnv
 
   - type: keyvalue
     name: lambda-cache
