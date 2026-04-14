@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import List
+from typing import List, Literal
 
 
 class Settings(BaseSettings):
@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_TTL_SECONDS: int = 60 * 15
     REFRESH_TOKEN_TTL_SECONDS: int = 60 * 60 * 24 * 7
     AUTH_COOKIE_SECURE: bool = False
+    AUTH_COOKIE_SAMESITE: Literal["lax", "strict", "none"] = "lax"
 
     LLM_PROVIDER: str = "openai"
     OPENAI_API_KEY: str = ""

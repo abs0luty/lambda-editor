@@ -1,8 +1,9 @@
 import axios, { type InternalAxiosRequestConfig } from 'axios'
 
+import { API_BASE_URL, apiUrl } from '../config'
 import { useStore, type User } from '../store/useStore'
 
-const api = axios.create({ baseURL: '/api', withCredentials: true })
+const api = axios.create({ baseURL: API_BASE_URL, withCredentials: true })
 let refreshRequest: Promise<void> | null = null
 
 function markAuthenticated(user: User) {
@@ -19,7 +20,7 @@ function clearAuth(redirectToLogin = true) {
 
 export async function refreshAuthSession(): Promise<void> {
   if (!refreshRequest) {
-    refreshRequest = axios.post('/api/tokens/refresh', undefined, { withCredentials: true })
+    refreshRequest = axios.post(apiUrl('/tokens/refresh'), undefined, { withCredentials: true })
       .then((res) => {
         markAuthenticated(res.data.user)
       })
@@ -132,7 +133,7 @@ export const docsApi = {
   delete: (projectId: string, docId: string) =>
     api.delete(`/projects/${projectId}/documents/${docId}`),
   downloadUrl: (projectId: string, docId: string) =>
-    `/api/projects/${projectId}/documents/${docId}/download`,
+    apiUrl(`/projects/${projectId}/documents/${docId}/download`),
 }
 
 export const versionsApi = {
@@ -175,7 +176,7 @@ export async function streamAI(
   onError: (err: string) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const makeRequest = () => fetch(`/api${endpoint}`, {
+  const makeRequest = () => fetch(apiUrl(endpoint), {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
