@@ -15,6 +15,13 @@ import { ACTION_DEFS, AVAILABLE_ACTIONS, genId, inferActionType, getActionPrompt
 import { chip, textareaStyle, closeBtnStyle, userBubble, actionBubble, botBubble, quoteBlockStyle } from './ai-chat/styles'
 import MarkdownMessage from './ai-chat/MarkdownMessage'
 
+type ActiveRequestState = {
+  actionId: string
+  responseId: string
+  kind: 'assistant' | 'diff'
+  retryRequest?: ActionRequest
+}
+
 export default function AIChat({
   socket,
   ydoc,
@@ -49,8 +56,9 @@ export default function AIChat({
   // Track server action IDs separately so streamed updates can resume the right message.
   const streamingMsgRef = useRef(new Map<string, string>())
   const actionRequestRef = useRef(new Map<string, ActionRequest>())
-  // AbortController for the active SSE stream so the user can stop generation.
+  // AbortController for the active AI request so the user can stop generation consistently.
   const abortControllerRef = useRef<AbortController | null>(null)
+  const activeRequestRef = useRef<ActiveRequestState | null>(null)
   const { currentDoc, user } = useStore()
   const effectiveEquationLocation = equationLocation ?? pendingEquationLocation ?? null
   const canReviewDiffs = !readOnly
@@ -63,6 +71,18 @@ export default function AIChat({
   const broadcast = useCallback((data: Record<string, unknown>) => {
     socketRef.current?.sendAiChat(data)
   }, [])
+
+  const clearActiveRequest = () => {
+    abortControllerRef.current = null
+    activeRequestRef.current = null
+  }
+
+  const isAbortError = (err: any) => (
+    err?.name === 'AbortError'
+    || err?.name === 'CanceledError'
+    || err?.code === 'ERR_CANCELED'
+    || err?.message === 'canceled'
+  )
 
   // Pull editor quotes into chat state so the editor can clear its transient selection UI.
   useEffect(() => {
@@ -168,6 +188,57 @@ export default function AIChat({
           ))
         }
 
+      } else if (event === 'cancelled') {
+        const responseKind = msg.response_kind === 'diff' ? 'diff' : 'res'
+        const responseId = (msg.response_id as string | undefined) || `${actionId}-${responseKind}`
+        const retryRequest = (msg.action_request as ActionRequest | undefined) ?? actionRequestRef.current.get(actionId)
+        const cancellationMessage = typeof msg.error === 'string' && msg.error ? msg.error : 'Cancelled by user'
+        if (streamingMsgRef.current.get(actionId) === responseId) {
+          streamingMsgRef.current.delete(actionId)
+        }
+        setMessages((prev) => {
+          const existing = prev.find((message) => message.id === responseId)
+          if (existing) {
+            return prev.map((message) => (
+              message.id === responseId
+                ? {
+                    ...message,
+                    streaming: false,
+                    status: 'cancelled',
+                    error: cancellationMessage,
+                    content: responseKind === 'res' && !message.content ? cancellationMessage : message.content,
+                    diff: responseKind === 'diff' ? (message.diff ?? { explanation: cancellationMessage, changes: [] }) : message.diff,
+                    retryAction: responseKind === 'diff' ? (message.retryAction ?? retryRequest) : message.retryAction,
+                  }
+                : message
+            ))
+          }
+
+          if (responseKind === 'diff') {
+            return [...prev, {
+              id: responseId,
+              role: 'assistant',
+              content: '',
+              streaming: false,
+              diff: { explanation: cancellationMessage, changes: [] },
+              retryAction: retryRequest,
+              fromUser,
+              status: 'cancelled',
+              error: cancellationMessage,
+            }]
+          }
+
+          return [...prev, {
+            id: responseId,
+            role: 'assistant',
+            content: cancellationMessage,
+            streaming: false,
+            fromUser,
+            status: 'cancelled',
+            error: cancellationMessage,
+          }]
+        })
+
       } else if (event === 'diff') {
         const retryRequest = (msg.action_request as ActionRequest | undefined) ?? actionRequestRef.current.get(actionId)
         setMessages((prev) => prev.some((m) => m.id === `${actionId}-diff`) ? prev : [...prev, {
@@ -253,6 +324,55 @@ export default function AIChat({
     }])
   }
 
+  const markCancelled = (
+    responseId: string,
+    kind: ActiveRequestState['kind'],
+    retryRequest?: ActionRequest,
+  ) => {
+    const cancellationMessage = 'Cancelled by user'
+    setMessages((prev) => {
+      const existing = prev.find((message) => message.id === responseId)
+      if (existing) {
+        return prev.map((message) => (
+          message.id === responseId
+            ? {
+                ...message,
+                streaming: false,
+                status: 'cancelled',
+                error: cancellationMessage,
+                content: kind === 'assistant' && !message.content ? cancellationMessage : message.content,
+                diff: kind === 'diff' ? (message.diff ?? { explanation: cancellationMessage, changes: [] }) : message.diff,
+                retryAction: kind === 'diff' ? (message.retryAction ?? retryRequest) : message.retryAction,
+              }
+            : message
+        ))
+      }
+
+      if (kind === 'diff') {
+        return [...prev, {
+          id: responseId,
+          role: 'assistant',
+          content: '',
+          streaming: false,
+          diff: { explanation: cancellationMessage, changes: [] },
+          retryAction: retryRequest,
+          status: 'cancelled',
+          error: cancellationMessage,
+        }]
+      }
+
+      return [...prev, {
+        id: responseId,
+        role: 'assistant',
+        content: cancellationMessage,
+        streaming: false,
+        status: 'cancelled',
+        error: cancellationMessage,
+      }]
+    })
+    setLoading(false)
+  }
+
   const renderToolCalls = (toolCalls?: ChatMessage['toolCalls']) => {
     if (!toolCalls || toolCalls.length === 0) return null
     return (
@@ -335,6 +455,7 @@ export default function AIChat({
     const controller = new AbortController()
     abortControllerRef.current = controller
     const responseId = `${aid}-res`
+    activeRequestRef.current = { actionId: aid, responseId, kind: 'assistant' }
     let started = false
     await streamAI(
       endpoint,
@@ -349,17 +470,29 @@ export default function AIChat({
         broadcast({ event: 'chunk', content: chunk, action_id: aid })
       },
       () => {
-        abortControllerRef.current = null
+        clearActiveRequest()
         finalizeMsg(responseId, { status: 'completed' })
         broadcast({ event: 'done', action_id: aid, status: 'completed' })
       },
       (err) => {
-        abortControllerRef.current = null
+        clearActiveRequest()
         const errorChunk = `**Error:** ${err}`
         if (!started) startStreamingMsg(responseId, errorChunk, { status: 'failed', error: err })
         else appendChunk(responseId, errorChunk)
         finalizeMsg(responseId, { status: 'failed', error: err })
         broadcast({ event: 'done', action_id: aid, status: 'failed', error: err })
+      },
+      () => {
+        clearActiveRequest()
+        markCancelled(responseId, 'assistant')
+        broadcast({
+          event: 'cancelled',
+          action_id: aid,
+          response_id: responseId,
+          response_kind: 'res',
+          status: 'cancelled',
+          error: 'Cancelled by user',
+        })
       },
       controller.signal,
     )
@@ -385,14 +518,18 @@ export default function AIChat({
 
     addUserMsg({ role: 'user', content: text, quotes: currentQuotes }, aid)
     broadcast({ event: 'user_msg', content: text, quotes: currentQuotes, action_id: aid })
+    const responseId = `${aid}-res`
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+    activeRequestRef.current = { actionId: aid, responseId, kind: 'assistant' }
     try {
       const res = await aiChatApi.agent(currentDoc?.project_id || '', currentDoc?.id || '', {
         prompt: fullPrompt,
         document_context: currentDoc?.content ?? '',
         action_id: aid,
-      })
+      }, controller.signal)
       addAssistantMsg(
-        `${aid}-res`,
+        responseId,
         res.data.content || '',
         res.data.sources || undefined,
         Array.isArray(res.data.tools_used) ? res.data.tools_used : undefined,
@@ -413,9 +550,21 @@ export default function AIChat({
         status: res.data.status || undefined,
       })
     } catch (err: any) {
+      if (isAbortError(err)) {
+        markCancelled(responseId, 'assistant')
+        broadcast({
+          event: 'cancelled',
+          action_id: aid,
+          response_id: responseId,
+          response_kind: 'res',
+          status: 'cancelled',
+          error: 'Cancelled by user',
+        })
+        return
+      }
       const detail = err?.response?.data?.detail
       const error = typeof detail === 'string' ? detail : 'Agent request failed.'
-      addAssistantMsg(`${aid}-res`, `**Error:** ${error}`, undefined, undefined, { status: 'failed', error })
+      addAssistantMsg(responseId, `**Error:** ${error}`, undefined, undefined, { status: 'failed', error })
       broadcast({
         event: 'agent_result',
         action_id: aid,
@@ -424,6 +573,7 @@ export default function AIChat({
         error,
       })
     } finally {
+      clearActiveRequest()
       setLoading(false)
     }
   }
@@ -435,6 +585,10 @@ export default function AIChat({
     broadcast({ event: 'user_msg', action_type: request.type, action_prompt: actionPrompt, quotes: currentQuotes, action_id: aid })
     actionRequestRef.current.set(aid, request)
     setLoading(true)
+    const responseId = `${aid}-diff`
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+    activeRequestRef.current = { actionId: aid, responseId, kind: 'diff', retryRequest: request }
 
     try {
       let res
@@ -445,7 +599,7 @@ export default function AIChat({
           location: request.location,
           variation_request: variationRequest,
           action_id: aid,
-        })
+        }, { signal: controller.signal })
       } else if (request.type === 'translate') {
         res = await api.post(`/projects/${currentDoc?.project_id}/documents/${currentDoc?.id}/ai/translation-suggestions`, {
           language: request.language,
@@ -453,14 +607,14 @@ export default function AIChat({
           document_content: currentDoc?.content || '',
           variation_request: variationRequest,
           action_id: aid,
-        })
+        }, { signal: controller.signal })
       } else if (request.type === 'suggest') {
         res = await api.post(`/projects/${currentDoc?.project_id}/documents/${currentDoc?.id}/ai/change-suggestions`, {
           instruction: request.instruction,
           document_content: currentDoc?.content || '',
           variation_request: variationRequest,
           action_id: aid,
-        })
+        }, { signal: controller.signal })
       } else {
         res = await api.post(`/projects/${currentDoc?.project_id}/documents/${currentDoc?.id}/ai/rewrite-suggestions`, {
           text: request.text,
@@ -468,7 +622,7 @@ export default function AIChat({
           document_content: currentDoc?.content || '',
           variation_request: variationRequest,
           action_id: aid,
-        })
+        }, { signal: controller.signal })
       }
       const toolCalls = Array.isArray(res.data.tool_calls) ? res.data.tool_calls : undefined
       const meta = {
@@ -476,7 +630,7 @@ export default function AIChat({
         model: res.data.model || undefined,
         status: res.data.status || undefined,
       }
-      addDiff(`${aid}-diff`, res.data, request, toolCalls, meta)
+      addDiff(responseId, res.data, request, toolCalls, meta)
       broadcast({
         event: 'diff',
         diff: res.data,
@@ -486,6 +640,19 @@ export default function AIChat({
         ...meta,
       })
     } catch (err: any) {
+      if (isAbortError(err)) {
+        markCancelled(responseId, 'diff', request)
+        broadcast({
+          event: 'cancelled',
+          action_id: aid,
+          response_id: responseId,
+          response_kind: 'diff',
+          action_request: request,
+          status: 'cancelled',
+          error: 'Cancelled by user',
+        })
+        return
+      }
       const detail = err?.response?.data?.detail
       const error = typeof detail === 'string' ? detail : undefined
       const explanation = request.type === 'equation'
@@ -493,10 +660,10 @@ export default function AIChat({
         : request.type === 'translate'
           ? 'Could not translate.'
           : request.type === 'suggest'
-            ? 'Could not fetch suggestions.'
+          ? 'Could not fetch suggestions.'
             : `Could not ${request.type}.`
       const fallbackDiff = { explanation: error || explanation, changes: [] }
-      addDiff(`${aid}-diff`, fallbackDiff, request, undefined, { status: 'failed', error })
+      addDiff(responseId, fallbackDiff, request, undefined, { status: 'failed', error })
       broadcast({
         event: 'diff',
         diff: fallbackDiff,
@@ -506,6 +673,7 @@ export default function AIChat({
         error,
       })
     } finally {
+      clearActiveRequest()
       setLoading(false)
     }
   }

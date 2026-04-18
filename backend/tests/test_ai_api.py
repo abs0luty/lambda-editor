@@ -1,5 +1,7 @@
+from app.api import ai as ai_module
 from app.services import ai_service
 from app.config import settings
+from app.services.ai_cancellation import AICancelledError
 
 
 async def _register(client, email: str, username: str):
@@ -209,3 +211,46 @@ async def test_failed_ai_diff_is_persisted_with_error_metadata(client, monkeypat
     }
     assert failed_message["diff"]["changes"] == []
     assert failed_message["diff"]["explanation"] == "LLM temporarily unavailable"
+
+
+async def test_cancelled_ai_diff_is_persisted_with_cancelled_status(client, monkeypatch):
+    await _register(client, "owner4@example.com", "owner4")
+    project = await _create_project(client, "AI Cancel")
+
+    async def cancelled_request(_request, _action_id, awaitable):
+        awaitable.close()
+        raise AICancelledError("Cancelled by user")
+
+    monkeypatch.setattr(ai_module, "run_cancellable_request", cancelled_request)
+
+    doc_response = await client.get(f"/projects/{project['id']}/documents/{project['main_doc_id']}")
+    assert doc_response.status_code == 200
+
+    diff_response = await client.post(
+        f"/projects/{project['id']}/documents/{project['main_doc_id']}/ai/change-suggestions",
+        json={
+            "instruction": "Cancel this edit",
+            "document_content": doc_response.json()["content"],
+            "action_id": "act-cancel",
+        },
+    )
+    assert diff_response.status_code == 499
+    assert diff_response.json()["detail"] == "Request cancelled"
+
+    history_response = await client.get(
+        f"/projects/{project['id']}/documents/{project['main_doc_id']}/ai/messages"
+    )
+    assert history_response.status_code == 200
+    history = history_response.json()
+    assert len(history) == 2
+
+    history_by_id = {message["id"]: message for message in history}
+    assert history_by_id["act-cancel"]["status"] == "cancelled"
+    assert history_by_id["act-cancel"]["error"] == "Cancelled by user"
+    assert history_by_id["act-cancel-diff"]["status"] == "cancelled"
+    assert history_by_id["act-cancel-diff"]["error"] == "Cancelled by user"
+    assert history_by_id["act-cancel-diff"]["diff"]["explanation"] == "Cancelled by user"
+    assert history_by_id["act-cancel-diff"]["retry_action"] == {
+        "type": "suggest",
+        "instruction": "Cancel this edit",
+    }
