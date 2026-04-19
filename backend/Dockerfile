@@ -7,6 +7,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    lmodern \
     texlive-latex-base \
     texlive-latex-recommended \
     texlive-latex-extra \
