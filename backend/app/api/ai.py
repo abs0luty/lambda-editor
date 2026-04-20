@@ -1045,6 +1045,8 @@ async def translate_diff(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:
         clear_action_cancelled(req.action_id)
+    error_message = str(result.get("error") or "").strip()
+    status = AI_STATUS_FAILED if error_message else AI_STATUS_COMPLETED
     await _persist_assistant_message(
         db,
         current_user.id,
@@ -1060,10 +1062,13 @@ async def translate_diff(
             "tool_calls": result.get("tool_calls", []),
         },
         tool_calls=result.get("tool_calls"),
-        status=AI_STATUS_COMPLETED,
+        status=status,
+        error_message=error_message or None,
     )
+    if error_message:
+        raise HTTPException(status_code=503, detail=error_message)
     provider, model = infer_provider_model(action_type="translate", tool_calls=result.get("tool_calls"))
-    return {**result, "provider": provider, "model": model, "status": AI_STATUS_COMPLETED}
+    return {**result, "provider": provider, "model": model, "status": status}
 
 
 @router.post("/projects/{project_id}/documents/{doc_id}/ai/equation-suggestions")

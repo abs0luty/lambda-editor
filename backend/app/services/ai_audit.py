@@ -19,5 +19,7 @@ def infer_provider_model(
 ) -> tuple[str, str]:
     tool_names = {name for name in (tool_calls or []) if isinstance(name, str) and name}
     if action_type == "translate" or tool_names == {"translate_text"}:
-        return TRANSLATION_PROVIDER, TRANSLATION_MODEL
+        if (settings.GOOGLE_TRANSLATE_API_KEY or "").strip():
+            return TRANSLATION_PROVIDER, TRANSLATION_MODEL
+        return settings.llm_provider, settings.llm_model
     return settings.llm_provider, settings.llm_model

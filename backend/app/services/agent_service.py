@@ -32,6 +32,17 @@ LANGUAGE_CODE_MAP = {
     "uzbek": "uz",
 }
 
+LANGUAGE_LABEL_MAP = {code: language.title() for language, code in LANGUAGE_CODE_MAP.items()}
+
+LLM_TRANSLATION_SYSTEM_PROMPT = """You translate text inside a collaborative LaTeX editor.
+
+Rules:
+- Return only the translated text. Do not add explanations, notes, or markdown fences.
+- Preserve placeholders like __LATEX_TOKEN_0__ exactly as written.
+- Preserve line breaks, spacing, punctuation, and paragraph structure as closely as possible.
+- Do not modify LaTeX commands, citations, labels, refs, math, or escaped characters.
+"""
+
 
 def _clip_document(document_context: str, limit: int = 5000) -> str:
     text = (document_context or "").strip()
@@ -126,6 +137,16 @@ def _normalize_language_code(language: str) -> str:
         return ""
     cleaned = re.sub(r"\s+", " ", cleaned)
     return LANGUAGE_CODE_MAP.get(cleaned, cleaned)
+
+
+def _describe_language(language: str) -> str:
+    normalized = _normalize_language_code(language)
+    if not normalized:
+        return ""
+    label = LANGUAGE_LABEL_MAP.get(normalized)
+    if label:
+        return f"{label} ({normalized})"
+    return normalized
 
 
 def _detect_translation_request(prompt: str) -> Optional[dict[str, str]]:
@@ -297,7 +318,7 @@ def _build_agent_tools() -> list[dict[str, Any]]:
         ),
         _function_tool(
             "translate_text",
-            "Translate text with Google Cloud Translation while preserving LaTeX commands and formatting exactly. Use ISO language codes like es, fr, de, kk, ru, or zh-CN.",
+            "Translate text while preserving LaTeX commands and formatting exactly. Prefer Google Cloud Translation when configured and otherwise fall back to the active LLM provider. Use ISO language codes like es, fr, de, kk, ru, or zh-CN.",
             {
                 "type": "object",
                 "properties": {
@@ -382,7 +403,7 @@ async def stream_tool_enabled_chat(
             direct_translation["text"],
             direct_translation["target_language"],
         )
-        content = translation.get("translation", "")
+        content = translation.get("error", "") or translation.get("translation", "")
         tools_used = ["translate_text"]
         if result_holder is not None:
             result_holder.update({"content": content, "sources": [], "tools_used": tools_used})
@@ -564,6 +585,35 @@ def _unmask_latex(text: str, replacements: dict[str, str]) -> str:
     return restored
 
 
+async def _translate_text_with_llm(masked_text: str, target_language: str) -> dict[str, str]:
+    if not settings.llm_api_key:
+        if settings.llm_api_key_env_name and settings.llm_api_key_env_name != "N/A":
+            return {"error": f"GOOGLE_TRANSLATE_API_KEY is not configured, and {settings.llm_api_key_env_name} is not configured."}
+        return {"error": "GOOGLE_TRANSLATE_API_KEY is not configured, and no LLM translation fallback is available."}
+
+    language_hint = _describe_language(target_language) or target_language
+    response_json = await _responses_create({
+        "model": settings.llm_model,
+        "instructions": LLM_TRANSLATION_SYSTEM_PROMPT,
+        "input": [{
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": (
+                    f"Translate the following text to {language_hint}.\n"
+                    "Return only the translated text.\n\n"
+                    f"{masked_text}"
+                ),
+            }],
+        }],
+    })
+    translated, _, _ = _extract_text_and_sources(response_json)
+    translated = translated.strip()
+    if not translated:
+        return {"error": f"{settings.llm_provider.title()} translation returned an empty response."}
+    return {"translation": translated}
+
+
 async def _translate_text(text: str, target_language: str) -> dict[str, str]:
     source_text = text.strip()
     language = target_language.strip().lower()
@@ -573,12 +623,15 @@ async def _translate_text(text: str, target_language: str) -> dict[str, str]:
         len(source_text),
     )
     if not source_text:
-        return {"translation": "No text was provided for translation."}
+        return {"error": "No text was provided for translation."}
     if not language:
-        return {"translation": "Target language is required."}
-    if not settings.GOOGLE_TRANSLATE_API_KEY:
-        return {"translation": "GOOGLE_TRANSLATE_API_KEY is not configured."}
+        return {"error": "Target language is required."}
     masked_text, replacements = _mask_latex(source_text)
+    if not (settings.GOOGLE_TRANSLATE_API_KEY or "").strip():
+        llm_fallback = await _translate_text_with_llm(masked_text, language)
+        if llm_fallback.get("error"):
+            return llm_fallback
+        return {"translation": _unmask_latex(str(llm_fallback.get("translation") or "").strip(), replacements)}
 
     payload: dict[str, Any] = {
         "q": masked_text,
@@ -597,12 +650,12 @@ async def _translate_text(text: str, target_language: str) -> dict[str, str]:
         )
     if response.status_code >= 400:
         detail = response.text.strip()
-        return {"translation": f"Translation API request failed: {detail or response.status_code}"}
+        return {"error": f"Translation API request failed: {detail or response.status_code}"}
 
     data = response.json()
     translated = str((((data.get("data") or {}).get("translations") or [{}])[0]).get("translatedText") or "").strip()
     if not translated:
-        return {"translation": "Translation API returned an empty response."}
+        return {"error": "Translation API returned an empty response."}
 
     logger.info("agent tool result: translate_text chars=%d", len(translated))
     return {"translation": _unmask_latex(translated, replacements)}
@@ -627,11 +680,12 @@ async def translate_diff_with_tool(
         }
 
     translation = await _translate_text(selected_text, _normalize_language_code(language))
+    error_message = translation.get("error", "").strip()
+    if error_message:
+        return {"explanation": error_message, "changes": [], "tool_calls": ["translate_text"], "error": error_message}
     translated_text = translation.get("translation", "").strip()
     if not translated_text:
         return {"explanation": "Translation returned no content.", "changes": [], "tool_calls": ["translate_text"]}
-    if translated_text.startswith("Translation API "):
-        return {"explanation": translated_text, "changes": [], "tool_calls": ["translate_text"]}
     if variation_request.strip():
         logger.info("translate-diff variation_request ignored=%r", variation_request.strip())
 
@@ -657,7 +711,7 @@ async def run_tool_enabled_chat(prompt: str, document_context: str = "") -> dict
         )
         logger.info("agent request completed via direct translate_text")
         return {
-            "content": translation.get("translation", ""),
+            "content": translation.get("error", "") or translation.get("translation", ""),
             "sources": [],
             "tools_used": ["translate_text"],
         }
