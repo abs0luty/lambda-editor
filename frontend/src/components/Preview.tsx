@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react'
-import { AlertCircle, CheckCircle, ChevronDown, ChevronUp, Download, ExternalLink, FileText, Loader2, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { AlertCircle, CheckCircle, ChevronDown, ChevronUp, Download, ExternalLink, FileText, Loader2, Minus, Plus, X } from 'lucide-react'
+import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist'
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { compileApi } from '../services/api'
 import { RoomSocket } from '../services/socket'
 import { useStore } from '../store/useStore'
@@ -14,10 +16,17 @@ type ExportFormat = 'pdf' | 'dvi' | 'ps'
 
 const EXPORT_FORMATS: ExportFormat[] = ['pdf', 'dvi', 'ps']
 
+GlobalWorkerOptions.workerSrc = pdfWorkerUrl
+
 function base64ToBlob(base64: string, mimeType: string) {
   const binary = atob(base64)
   const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
   return new Blob([bytes], { type: mimeType })
+}
+
+function base64ToBytes(base64: string) {
+  const binary = atob(base64)
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0))
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -87,7 +96,6 @@ export default function Preview({ onClose, socket }: Props) {
   }
 
   const pdfUrl = compiledPdf ? `data:application/pdf;base64,${compiledPdf}` : null
-  const pdfEmbedUrl = pdfUrl ? `${pdfUrl}#page=1&zoom=page-width` : null
   const previewTitle = currentDoc?.path || currentDoc?.title || 'Rendered PDF'
 
   return (
@@ -210,41 +218,17 @@ export default function Preview({ onClose, socket }: Props) {
 
       {/* PDF viewer */}
       <div style={{ flex: 1, overflow: 'hidden', background: C.bgSurface, padding: 12 }}>
-        {pdfEmbedUrl ? (
+        {compiledPdf ? (
           <div style={{
             height: '100%',
-            overflow: 'hidden',
+            overflow: 'auto',
             position: 'relative',
             borderRadius: 12,
             border: `1px solid ${C.border}`,
             background: '#fff',
             boxShadow: '0 18px 42px rgba(15,23,42,0.12)',
           }}>
-            <iframe
-              src={pdfEmbedUrl}
-              style={{
-                width: '100%',
-                height: '100%',
-                border: 'none',
-                background: '#fff',
-                display: 'block',
-              }}
-              title="PDF Preview"
-            />
-            {/* Mask the noisy generated filename while preserving the viewer toolbar controls. */}
-            <div
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: 360,
-                maxWidth: '48%',
-                height: 36,
-                background: '#3c4043',
-                borderTopLeftRadius: 12,
-                pointerEvents: 'none',
-              }}
-            />
+            <PdfCanvasPreview pdfBase64={compiledPdf!} />
           </div>
         ) : (
           <div style={{
@@ -306,8 +290,295 @@ export default function Preview({ onClose, socket }: Props) {
   )
 }
 
+function PdfCanvasPreview({ pdfBase64 }: { pdfBase64: string }) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const pageRefs = useRef<Array<HTMLElement | null>>([])
+  const [containerWidth, setContainerWidth] = useState(0)
+  const [pages, setPages] = useState<Array<{ pageNumber: number, dataUrl: string, width: number, height: number }>>([])
+  const [pageCount, setPageCount] = useState(0)
+  const [currentPage, setCurrentPage] = useState(1)
+  const [isRendering, setIsRendering] = useState(false)
+  const [renderError, setRenderError] = useState<string | null>(null)
+  const [zoom, setZoom] = useState(1)
+
+  useEffect(() => {
+    const node = containerRef.current
+    if (!node) return
+
+    const updateWidth = () => setContainerWidth(node.clientWidth)
+    updateWidth()
+
+    const observer = new ResizeObserver(updateWidth)
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (!pdfBase64 || !containerWidth) return
+
+    let cancelled = false
+
+    const renderPdf = async () => {
+      setIsRendering(true)
+      setRenderError(null)
+
+      try {
+        const loadingTask = getDocument({ data: base64ToBytes(pdfBase64) })
+        const pdf = await loadingTask.promise
+        if (cancelled) {
+          await loadingTask.destroy()
+          return
+        }
+
+        setPageCount(pdf.numPages)
+        setCurrentPage(1)
+        const nextPages: Array<{ pageNumber: number, dataUrl: string, width: number, height: number }> = []
+        const availableWidth = Math.max(containerWidth - 48, 240)
+        const pixelRatio = window.devicePixelRatio || 1
+
+        for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+          const page = await pdf.getPage(pageNumber)
+          const unscaledViewport = page.getViewport({ scale: 1 })
+          const scale = Math.max(0.35, Math.min(2, availableWidth / unscaledViewport.width))
+          const viewport = page.getViewport({ scale })
+          const renderViewport = page.getViewport({ scale: scale * pixelRatio * 1.5 })
+          const canvas = document.createElement('canvas')
+          const context = canvas.getContext('2d')
+          if (!context) throw new Error('Canvas rendering is unavailable')
+
+          canvas.width = Math.ceil(renderViewport.width)
+          canvas.height = Math.ceil(renderViewport.height)
+
+          await page.render({
+            canvas,
+            canvasContext: context,
+            viewport: renderViewport,
+          }).promise
+
+          if (cancelled) return
+
+          nextPages.push({
+            pageNumber,
+            dataUrl: canvas.toDataURL('image/png'),
+            width: Math.ceil(viewport.width),
+            height: Math.ceil(viewport.height),
+          })
+
+          page.cleanup()
+        }
+
+        if (!cancelled) setPages(nextPages)
+      } catch (error) {
+        if (!cancelled) {
+          setPages([])
+          setPageCount(0)
+          setRenderError(error instanceof Error ? error.message : 'PDF preview failed to load')
+        }
+      } finally {
+        if (!cancelled) setIsRendering(false)
+      }
+    }
+
+    void renderPdf()
+
+    return () => {
+      cancelled = true
+    }
+  }, [containerWidth, pdfBase64])
+
+  useEffect(() => {
+    const node = containerRef.current
+    if (!node || pages.length === 0) return
+
+    const updateCurrentPage = () => {
+      const scrollAnchor = node.scrollTop + 96
+      let activePage = 1
+
+      for (const page of pages) {
+        const pageNode = pageRefs.current[page.pageNumber - 1]
+        if (!pageNode) continue
+        if (pageNode.offsetTop <= scrollAnchor) {
+          activePage = page.pageNumber
+        } else {
+          break
+        }
+      }
+
+      setCurrentPage(activePage)
+    }
+
+    updateCurrentPage()
+    node.addEventListener('scroll', updateCurrentPage, { passive: true })
+    return () => node.removeEventListener('scroll', updateCurrentPage)
+  }, [pages, zoom])
+
+  const zoomOut = () => setZoom((value) => Math.max(0.5, Number((value - 0.25).toFixed(2))))
+  const zoomIn = () => setZoom((value) => Math.min(2.5, Number((value + 0.25).toFixed(2))))
+  const resetZoom = () => setZoom(1)
+
+  return (
+    <div
+      style={{
+        height: '100%',
+        overflow: 'hidden',
+        position: 'relative',
+        background: 'linear-gradient(180deg, #eef2f7 0%, #e7ecf3 100%)',
+      }}
+    >
+      <div
+        style={{
+          position: 'absolute',
+          top: 16,
+          left: 16,
+          zIndex: 3,
+          pointerEvents: 'none',
+        }}
+      >
+        <div style={floatingBadge}>
+          <span style={{ fontSize: 12, color: C.textSecondary }}>
+            {isRendering ? 'Rendering preview…' : pageCount > 0 ? `Page ${currentPage} / ${pageCount}` : 'Preview'}
+          </span>
+        </div>
+      </div>
+
+      <div
+        style={{
+          position: 'absolute',
+          top: 16,
+          right: 16,
+          zIndex: 3,
+          pointerEvents: 'none',
+        }}
+      >
+        <div style={{ ...floatingBadge, pointerEvents: 'auto' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <button
+              onClick={zoomOut}
+              disabled={zoom <= 0.5}
+              style={{ ...zoomButton, cursor: zoom <= 0.5 ? 'not-allowed' : 'pointer' }}
+              title="Zoom out"
+            >
+              <Minus size={12} />
+            </button>
+            <button
+              onClick={resetZoom}
+              disabled={zoom === 1}
+              style={{ ...zoomLabelButton, cursor: zoom === 1 ? 'not-allowed' : 'pointer' }}
+              title="Reset zoom"
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+            <button
+              onClick={zoomIn}
+              disabled={zoom >= 2.5}
+              style={{ ...zoomButton, cursor: zoom >= 2.5 ? 'not-allowed' : 'pointer' }}
+              title="Zoom in"
+            >
+              <Plus size={12} />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div
+        ref={containerRef}
+        style={{
+          height: '100%',
+          overflow: 'auto',
+        }}
+      >
+        <div style={{ padding: '72px 20px 20px', display: 'grid', gap: 18, justifyItems: 'center' }}>
+          {pages.map((page) => (
+            <figure
+              key={page.pageNumber}
+              ref={(node) => { pageRefs.current[page.pageNumber - 1] = node }}
+              style={{
+                margin: 0,
+                width: page.width * zoom,
+                maxWidth: '100%',
+                display: 'grid',
+                gap: 8,
+                justifyItems: 'center',
+              }}
+            >
+              <img
+                src={page.dataUrl}
+                alt={`PDF page ${page.pageNumber}`}
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  height: 'auto',
+                  background: '#fff',
+                  boxShadow: '0 20px 45px rgba(15,23,42,0.16)',
+                }}
+              />
+              <figcaption style={{ fontSize: 11, color: C.textMuted }}>
+                Page {page.pageNumber}
+              </figcaption>
+            </figure>
+          ))}
+
+          {isRendering && pages.length === 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: C.textSecondary, fontSize: 13 }}>
+              <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+              <span>Building preview pages…</span>
+            </div>
+          )}
+
+          {renderError && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: C.red, fontSize: 13 }}>
+              <AlertCircle size={14} />
+              <span>{renderError}</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 const closeBtn: React.CSSProperties = {
   display: 'flex', alignItems: 'center', justifyContent: 'center',
   width: 24, height: 24, borderRadius: 5, border: `1px solid ${C.border}`,
   background: 'transparent', color: C.textMuted, cursor: 'pointer', flexShrink: 0,
+}
+
+const zoomButton: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: 26,
+  height: 26,
+  borderRadius: 6,
+  border: `1px solid ${C.border}`,
+  background: '#fff',
+  color: C.textSecondary,
+  cursor: 'pointer',
+  flexShrink: 0,
+}
+
+const zoomLabelButton: React.CSSProperties = {
+  minWidth: 58,
+  height: 26,
+  padding: '0 10px',
+  borderRadius: 6,
+  border: `1px solid ${C.border}`,
+  background: '#fff',
+  color: C.textSecondary,
+  fontSize: 11.5,
+  fontFamily: 'inherit',
+  flexShrink: 0,
+}
+
+const floatingBadge: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  padding: '8px 12px',
+  borderRadius: 999,
+  background: 'rgba(238,242,247,0.92)',
+  backdropFilter: 'blur(10px)',
+  border: `1px solid ${C.borderFaint}`,
+  boxShadow: '0 10px 24px rgba(15,23,42,0.10)',
+  pointerEvents: 'auto',
 }
