@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS document_versions (
 CREATE TABLE IF NOT EXISTS ai_chat_messages (
     id VARCHAR PRIMARY KEY,
     document_id VARCHAR NOT NULL REFERENCES documents (id),
+    thread_id VARCHAR NOT NULL,
     user_id VARCHAR NOT NULL REFERENCES users (id),
     role VARCHAR NOT NULL,
     content TEXT NOT NULL,
@@ -89,5 +90,6 @@ CREATE TABLE IF NOT EXISTS ai_chat_messages (
 );
 
 CREATE INDEX IF NOT EXISTS ix_ai_chat_messages_document_id ON ai_chat_messages (document_id);
+CREATE INDEX IF NOT EXISTS ix_ai_chat_messages_thread_id ON ai_chat_messages (thread_id);
 
 COMMIT;

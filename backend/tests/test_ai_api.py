@@ -226,6 +226,72 @@ async def test_ai_diff_history_and_review_state_are_persisted(client_factory, mo
     assert viewer_response.status_code == 403
 
 
+async def test_ai_history_supports_threads_and_thread_summaries(client, monkeypatch):
+    await _register(client, "thread-owner@example.com", "thread-owner")
+    project = await _create_project(client, "AI Threads")
+
+    async def fake_suggest_changes(instruction: str, document_content: str, variation_request: str = ""):
+        return {
+            "explanation": f"Suggestion for {instruction}",
+            "changes": [
+                {
+                    "id": f"change-{instruction}",
+                    "description": f"Rewrite for {instruction}",
+                    "old_text": "Introduction",
+                    "new_text": instruction,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(ai_service, "suggest_changes", fake_suggest_changes)
+
+    doc_response = await client.get(f"/projects/{project['id']}/documents/{project['main_doc_id']}")
+    assert doc_response.status_code == 200
+    content = doc_response.json()["content"]
+
+    first_thread_response = await client.post(
+        f"/projects/{project['id']}/documents/{project['main_doc_id']}/ai/change-suggestions",
+        json={
+            "instruction": "Thread one",
+            "document_content": content,
+            "action_id": "act-thread-1",
+            "thread_id": "thread-1",
+        },
+    )
+    assert first_thread_response.status_code == 200
+
+    second_thread_response = await client.post(
+        f"/projects/{project['id']}/documents/{project['main_doc_id']}/ai/change-suggestions",
+        json={
+            "instruction": "Thread two",
+            "document_content": content,
+            "action_id": "act-thread-2",
+            "thread_id": "thread-2",
+        },
+    )
+    assert second_thread_response.status_code == 200
+
+    filtered_history_response = await client.get(
+        f"/projects/{project['id']}/documents/{project['main_doc_id']}/ai/messages",
+        params={"thread_id": "thread-1"},
+    )
+    assert filtered_history_response.status_code == 200
+    filtered_history = filtered_history_response.json()
+    assert len(filtered_history) == 2
+    assert {message["thread_id"] for message in filtered_history} == {"thread-1"}
+    assert {message["id"] for message in filtered_history} == {"act-thread-1", "act-thread-1-diff"}
+
+    threads_response = await client.get(
+        f"/projects/{project['id']}/documents/{project['main_doc_id']}/ai/threads"
+    )
+    assert threads_response.status_code == 200
+    summaries = threads_response.json()
+    assert [summary["id"] for summary in summaries] == ["thread-2", "thread-1"]
+    assert summaries[0]["title"] == "Thread two"
+    assert summaries[0]["preview"] == "Suggestion for Thread two"
+    assert summaries[0]["message_count"] == 2
+
+
 async def _drain(response) -> str:
     body = ""
     async for piece in response.body_iterator:

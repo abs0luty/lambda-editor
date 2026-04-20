@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -75,12 +76,14 @@ class GenerateRequest(BaseModel):
     prompt: str
     document_context: Optional[str] = ""
     action_id: Optional[str] = None
+    thread_id: Optional[str] = None
 
 
 class AgentRequest(BaseModel):
     prompt: str
     document_context: Optional[str] = ""
     action_id: Optional[str] = None
+    thread_id: Optional[str] = None
 
 
 class RewriteRequest(BaseModel):
@@ -88,6 +91,7 @@ class RewriteRequest(BaseModel):
     style: str  # academic | simplify | expand | continue | summarize | translate:{lang} | restructure
     document_context: Optional[str] = ""
     action_id: Optional[str] = None
+    thread_id: Optional[str] = None
 
 
 class FixLatexRequest(BaseModel):
@@ -112,6 +116,7 @@ class SuggestChangesRequest(BaseModel):
     document_content: str
     variation_request: Optional[str] = ""
     action_id: Optional[str] = None
+    thread_id: Optional[str] = None
 
 
 class TranslateDiffRequest(BaseModel):
@@ -120,6 +125,7 @@ class TranslateDiffRequest(BaseModel):
     document_content: str
     variation_request: Optional[str] = ""
     action_id: Optional[str] = None
+    thread_id: Optional[str] = None
 
 
 class RewriteDiffRequest(BaseModel):
@@ -128,6 +134,7 @@ class RewriteDiffRequest(BaseModel):
     document_content: str
     variation_request: Optional[str] = ""
     action_id: Optional[str] = None
+    thread_id: Optional[str] = None
 
 
 class LocationContext(BaseModel):
@@ -143,10 +150,12 @@ class EquationDiffRequest(BaseModel):
     location: Optional[LocationContext] = None
     variation_request: Optional[str] = ""
     action_id: Optional[str] = None
+    thread_id: Optional[str] = None
 
 
 class ChatHistoryMessageResponse(BaseModel):
     id: str
+    thread_id: str
     role: str
     content: str
     action_type: Optional[str] = None
@@ -164,6 +173,15 @@ class ChatHistoryMessageResponse(BaseModel):
     error: Optional[str] = None
     from_user: Optional[str] = None
     created_at: Optional[str] = None
+
+
+class ChatThreadSummaryResponse(BaseModel):
+    id: str
+    title: str
+    preview: str
+    message_count: int
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 class ReviewStateUpdateRequest(BaseModel):
@@ -223,12 +241,87 @@ def _loads(payload: Optional[str], fallback):
         return fallback
 
 
+def _resolve_thread_id(doc_id: str, thread_id: Optional[str]) -> str:
+    return (thread_id or "").strip() or doc_id
+
+
+def _truncate_text(value: Optional[str], limit: int = 72) -> str:
+    text = " ".join((value or "").strip().split())
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 1].rstrip()}…"
+
+
+def _action_label(action_type: Optional[str]) -> str:
+    labels = {
+        "suggest": "AI edit",
+        "translate": "Translate",
+        "equation": "Equation",
+        "summarize": "Summarize",
+        "simplify": "Simplify",
+    }
+    return labels.get(action_type or "", (action_type or "New chat").replace("_", " ").strip().title() or "New chat")
+
+
+def _thread_title(message: AIChatMessage) -> str:
+    return (
+        _truncate_text(message.action_prompt, 48)
+        or _truncate_text(message.content, 48)
+        or _action_label(message.action_type)
+    )
+
+
+def _message_preview(message: AIChatMessage) -> str:
+    if message.error_message:
+        return _truncate_text(message.error_message, 96)
+    diff = _loads(message.diff_json, {})
+    if isinstance(diff, dict):
+        explanation = diff.get("explanation")
+        if isinstance(explanation, str) and explanation.strip():
+            return _truncate_text(explanation, 96)
+    return (
+        _truncate_text(message.content, 96)
+        or _truncate_text(message.action_prompt, 96)
+        or _action_label(message.action_type)
+    )
+
+
+def _build_thread_summaries(rows: list[tuple[AIChatMessage, str]], doc_id: str) -> list[ChatThreadSummaryResponse]:
+    grouped: OrderedDict[str, list[tuple[AIChatMessage, str]]] = OrderedDict()
+    for message, username in rows:
+        resolved_thread_id = _resolve_thread_id(doc_id, message.thread_id)
+        grouped.setdefault(resolved_thread_id, []).append((message, username))
+
+    summaries: list[tuple[datetime, ChatThreadSummaryResponse]] = []
+    for thread_id, items in grouped.items():
+        first_user_message = next((message for message, _ in items if message.role == "user"), items[0][0])
+        latest_message = items[-1][0]
+        latest_timestamp = latest_message.created_at or datetime.min
+        summaries.append((
+            latest_timestamp,
+            ChatThreadSummaryResponse(
+                id=thread_id,
+                title=_thread_title(first_user_message),
+                preview=_message_preview(latest_message),
+                message_count=len(items),
+                created_at=items[0][0].created_at.isoformat() if items[0][0].created_at else None,
+                updated_at=latest_message.created_at.isoformat() if latest_message.created_at else None,
+            ),
+        ))
+
+    summaries.sort(key=lambda entry: (entry[0], entry[1].id), reverse=True)
+    return [summary for _, summary in summaries]
+
+
 async def _persist_assistant_message(
     db: AsyncSession,
     user_id: str,
     project_id: Optional[str],
     doc_id: Optional[str],
     message_id: Optional[str],
+    thread_id: Optional[str] = None,
     *,
     content: str = "",
     sources: Optional[list[dict]] = None,
@@ -244,6 +337,7 @@ async def _persist_assistant_message(
     if not project_id or not doc_id or not message_id:
         return
 
+    resolved_thread_id = _resolve_thread_id(doc_id, thread_id)
     await _purge_ai_history(db, doc_id=doc_id)
     doc = await _require_document_access(project_id, doc_id, user_id, db)
     if not doc:
@@ -251,6 +345,8 @@ async def _persist_assistant_message(
 
     existing = await db.get(AIChatMessage, message_id)
     if existing:
+        if not existing.thread_id:
+            existing.thread_id = resolved_thread_id
         if provider and not existing.provider:
             existing.provider = provider
         if model and not existing.model:
@@ -271,6 +367,7 @@ async def _persist_assistant_message(
     db.add(AIChatMessage(
         id=message_id,
         document_id=doc_id,
+        thread_id=resolved_thread_id,
         user_id=user_id,
         role="assistant",
         content=content,
@@ -296,6 +393,7 @@ async def _persist_user_message(
     project_id: Optional[str],
     doc_id: Optional[str],
     message_id: Optional[str],
+    thread_id: Optional[str] = None,
     *,
     content: str = "",
     action_type: Optional[str] = None,
@@ -305,6 +403,7 @@ async def _persist_user_message(
     if not project_id or not doc_id or not message_id:
         return
 
+    resolved_thread_id = _resolve_thread_id(doc_id, thread_id)
     await _purge_ai_history(db, doc_id=doc_id)
     doc = await _require_document_access(project_id, doc_id, user_id, db)
     if not doc:
@@ -313,6 +412,8 @@ async def _persist_user_message(
     provider, model = infer_provider_model(action_type=action_type)
     existing = await db.get(AIChatMessage, message_id)
     if existing:
+        if not existing.thread_id:
+            existing.thread_id = resolved_thread_id
         if content and not existing.content:
             existing.content = content
         if action_type and not existing.action_type:
@@ -333,6 +434,7 @@ async def _persist_user_message(
     db.add(AIChatMessage(
         id=message_id,
         document_id=doc_id,
+        thread_id=resolved_thread_id,
         user_id=user_id,
         role="user",
         content=content,
@@ -353,6 +455,7 @@ async def _persist_cancelled_action(
     doc_id: Optional[str],
     action_id: Optional[str],
     response_id: Optional[str],
+    thread_id: Optional[str] = None,
     *,
     action_type: Optional[str] = None,
     retry_action: Optional[dict] = None,
@@ -362,6 +465,7 @@ async def _persist_cancelled_action(
     if not project_id or not doc_id:
         return
 
+    resolved_thread_id = _resolve_thread_id(doc_id, thread_id)
     await _purge_ai_history(db, doc_id=doc_id)
     doc = await _require_document_access(project_id, doc_id, user_id, db)
     if not doc:
@@ -373,11 +477,15 @@ async def _persist_cancelled_action(
     provider, model = infer_provider_model(action_type=resolved_action_type)
 
     if user_message:
+        if not user_message.thread_id:
+            user_message.thread_id = resolved_thread_id
         user_message.status = AI_STATUS_CANCELLED
         user_message.error_message = cancellation_message
 
     assistant_message = await db.get(AIChatMessage, response_id) if response_id else None
     if assistant_message:
+        if not assistant_message.thread_id:
+            assistant_message.thread_id = resolved_thread_id
         assistant_message.status = AI_STATUS_CANCELLED
         assistant_message.error_message = cancellation_message
         if resolved_action_type and not assistant_message.action_type:
@@ -396,6 +504,7 @@ async def _persist_cancelled_action(
         db.add(AIChatMessage(
             id=response_id,
             document_id=doc_id,
+            thread_id=resolved_thread_id,
             user_id=user_id,
             role="assistant",
             content=partial_content or ("" if is_diff else cancellation_message),
@@ -420,6 +529,7 @@ def _sse(
     on_cancel=None,
     doc_id: Optional[str] = None,
     action_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
     broadcast_exclude_user_id: Optional[str] = None,
     actor_username: Optional[str] = None,
 ):
@@ -439,6 +549,8 @@ def _sse(
         }
         if actor_username:
             message["username"] = actor_username
+        if thread_id:
+            message["thread_id"] = thread_id
         message.update(extra)
         return message
 
@@ -525,12 +637,14 @@ async def generate(
     db: AsyncSession = Depends(get_db),
 ):
     await _require_document_edit_access(project_id, doc_id, current_user.id, db)
+    resolved_thread_id = _resolve_thread_id(doc_id, req.thread_id)
     await _persist_user_message(
         db,
         current_user.id,
         project_id,
         doc_id,
         req.action_id,
+        thread_id=resolved_thread_id,
         content=req.prompt,
         action_prompt=req.prompt,
     )
@@ -543,6 +657,7 @@ async def generate(
             project_id,
             doc_id,
             f"{req.action_id}-res" if req.action_id else None,
+            thread_id=resolved_thread_id,
             content=content,
             status=AI_STATUS_COMPLETED,
         ),
@@ -552,6 +667,7 @@ async def generate(
             project_id,
             doc_id,
             f"{req.action_id}-res" if req.action_id else None,
+            thread_id=resolved_thread_id,
             content="",
             status=AI_STATUS_FAILED,
             error_message=error,
@@ -563,10 +679,12 @@ async def generate(
             doc_id,
             req.action_id,
             f"{req.action_id}-res" if req.action_id else None,
+            thread_id=resolved_thread_id,
             partial_content=content,
         ),
         doc_id=doc_id,
         action_id=req.action_id,
+        thread_id=resolved_thread_id,
         broadcast_exclude_user_id=current_user.id,
         actor_username=current_user.username,
     )
@@ -582,12 +700,14 @@ async def agent_chat(
     db: AsyncSession = Depends(get_db),
 ):
     await _require_document_edit_access(project_id, doc_id, current_user.id, db)
+    resolved_thread_id = _resolve_thread_id(doc_id, req.thread_id)
     await _persist_user_message(
         db,
         current_user.id,
         project_id,
         doc_id,
         req.action_id,
+        thread_id=resolved_thread_id,
         content=req.prompt,
         action_prompt=req.prompt,
     )
@@ -605,6 +725,7 @@ async def agent_chat(
             doc_id,
             req.action_id,
             f"{req.action_id}-res" if req.action_id else None,
+            thread_id=resolved_thread_id,
         )
         raise HTTPException(status_code=499, detail="Request cancelled")
     except RuntimeError as exc:
@@ -614,6 +735,7 @@ async def agent_chat(
             project_id,
             doc_id,
             f"{req.action_id}-res" if req.action_id else None,
+            thread_id=resolved_thread_id,
             content="",
             status=AI_STATUS_FAILED,
             error_message=str(exc),
@@ -629,6 +751,7 @@ async def agent_chat(
         project_id,
         doc_id,
         f"{req.action_id}-res" if req.action_id else None,
+        thread_id=resolved_thread_id,
         content=result.get("content", ""),
         sources=result.get("sources") or None,
         tool_calls=result.get("tools_used") or None,
@@ -652,12 +775,14 @@ async def agent_chat_stream(
     db: AsyncSession = Depends(get_db),
 ):
     await _require_document_edit_access(project_id, doc_id, current_user.id, db)
+    resolved_thread_id = _resolve_thread_id(doc_id, req.thread_id)
     await _persist_user_message(
         db,
         current_user.id,
         project_id,
         doc_id,
         req.action_id,
+        thread_id=resolved_thread_id,
         content=req.prompt,
         action_prompt=req.prompt,
     )
@@ -686,6 +811,7 @@ async def agent_chat_stream(
             project_id,
             doc_id,
             f"{req.action_id}-res" if req.action_id else None,
+            thread_id=resolved_thread_id,
             content=resolved_content,
             sources=sources,
             tool_calls=tool_calls,
@@ -699,6 +825,7 @@ async def agent_chat_stream(
                 "type": "ai_chat",
                 "event": "agent_result",
                 "action_id": req.action_id,
+                "thread_id": resolved_thread_id,
                 "username": current_user.username,
                 "content": resolved_content,
                 "sources": sources,
@@ -717,6 +844,7 @@ async def agent_chat_stream(
             project_id,
             doc_id,
             f"{req.action_id}-res" if req.action_id else None,
+            thread_id=resolved_thread_id,
             content="",
             status=AI_STATUS_FAILED,
             error_message=error,
@@ -727,6 +855,7 @@ async def agent_chat_stream(
                 "type": "ai_chat",
                 "event": "agent_result",
                 "action_id": req.action_id,
+                "thread_id": resolved_thread_id,
                 "username": current_user.username,
                 "content": f"**Error:** {error}",
                 "status": AI_STATUS_FAILED,
@@ -747,10 +876,12 @@ async def agent_chat_stream(
             doc_id,
             req.action_id,
             f"{req.action_id}-res" if req.action_id else None,
+            thread_id=resolved_thread_id,
             partial_content=content,
         ),
         doc_id=doc_id,
         action_id=req.action_id,
+        thread_id=resolved_thread_id,
         broadcast_exclude_user_id=current_user.id,
         actor_username=current_user.username,
     )
@@ -766,12 +897,14 @@ async def rewrite(
     db: AsyncSession = Depends(get_db),
 ):
     await _require_document_edit_access(project_id, doc_id, current_user.id, db)
+    resolved_thread_id = _resolve_thread_id(doc_id, req.thread_id)
     await _persist_user_message(
         db,
         current_user.id,
         project_id,
         doc_id,
         req.action_id,
+        thread_id=resolved_thread_id,
         action_type=req.style,
         action_prompt=req.text or "Full document",
     )
@@ -784,6 +917,7 @@ async def rewrite(
             project_id,
             doc_id,
             f"{req.action_id}-res" if req.action_id else None,
+            thread_id=resolved_thread_id,
             content=content,
             action_type=req.style,
             status=AI_STATUS_COMPLETED,
@@ -794,6 +928,7 @@ async def rewrite(
             project_id,
             doc_id,
             f"{req.action_id}-res" if req.action_id else None,
+            thread_id=resolved_thread_id,
             content="",
             action_type=req.style,
             status=AI_STATUS_FAILED,
@@ -806,11 +941,13 @@ async def rewrite(
             doc_id,
             req.action_id,
             f"{req.action_id}-res" if req.action_id else None,
+            thread_id=resolved_thread_id,
             action_type=req.style,
             partial_content=content,
         ),
         doc_id=doc_id,
         action_id=req.action_id,
+        thread_id=resolved_thread_id,
         broadcast_exclude_user_id=current_user.id,
         actor_username=current_user.username,
     )
@@ -847,12 +984,14 @@ async def suggest_changes(
 ):
     """Return a structured JSON diff: explanation + list of hunks with old_text/new_text."""
     await _require_document_edit_access(project_id, doc_id, current_user.id, db)
+    resolved_thread_id = _resolve_thread_id(doc_id, req.thread_id)
     await _persist_user_message(
         db,
         current_user.id,
         project_id,
         doc_id,
         req.action_id,
+        thread_id=resolved_thread_id,
         action_type="suggest",
         action_prompt=req.instruction,
     )
@@ -870,6 +1009,7 @@ async def suggest_changes(
             doc_id,
             req.action_id,
             f"{req.action_id}-diff" if req.action_id else None,
+            thread_id=resolved_thread_id,
             action_type="suggest",
             retry_action={"type": "suggest", "instruction": req.instruction},
             is_diff=True,
@@ -882,6 +1022,7 @@ async def suggest_changes(
             project_id,
             doc_id,
             f"{req.action_id}-diff" if req.action_id else None,
+            thread_id=resolved_thread_id,
             action_type="suggest",
             diff={"explanation": str(exc), "changes": []},
             retry_action={"type": "suggest", "instruction": req.instruction},
@@ -897,6 +1038,7 @@ async def suggest_changes(
         project_id,
         doc_id,
         f"{req.action_id}-diff" if req.action_id else None,
+        thread_id=resolved_thread_id,
         diff=result,
         action_type="suggest",
         retry_action={"type": "suggest", "instruction": req.instruction},
@@ -917,12 +1059,14 @@ async def rewrite_diff(
     db: AsyncSession = Depends(get_db),
 ):
     await _require_document_edit_access(project_id, doc_id, current_user.id, db)
+    resolved_thread_id = _resolve_thread_id(doc_id, req.thread_id)
     await _persist_user_message(
         db,
         current_user.id,
         project_id,
         doc_id,
         req.action_id,
+        thread_id=resolved_thread_id,
         action_type=req.style,
         action_prompt=req.text or "Full document",
     )
@@ -940,6 +1084,7 @@ async def rewrite_diff(
             doc_id,
             req.action_id,
             f"{req.action_id}-diff" if req.action_id else None,
+            thread_id=resolved_thread_id,
             action_type=req.style,
             retry_action={"type": req.style, "text": req.text},
             is_diff=True,
@@ -952,6 +1097,7 @@ async def rewrite_diff(
             project_id,
             doc_id,
             f"{req.action_id}-diff" if req.action_id else None,
+            thread_id=resolved_thread_id,
             action_type=req.style,
             diff={"explanation": str(exc), "changes": []},
             retry_action={"type": req.style, "text": req.text},
@@ -967,6 +1113,7 @@ async def rewrite_diff(
         project_id,
         doc_id,
         f"{req.action_id}-diff" if req.action_id else None,
+        thread_id=resolved_thread_id,
         diff=result,
         action_type=req.style,
         retry_action={"type": req.style, "text": req.text},
@@ -987,12 +1134,14 @@ async def translate_diff(
     db: AsyncSession = Depends(get_db),
 ):
     await _require_document_edit_access(project_id, doc_id, current_user.id, db)
+    resolved_thread_id = _resolve_thread_id(doc_id, req.thread_id)
     await _persist_user_message(
         db,
         current_user.id,
         project_id,
         doc_id,
         req.action_id,
+        thread_id=resolved_thread_id,
         action_type="translate",
         action_prompt=req.language,
     )
@@ -1015,6 +1164,7 @@ async def translate_diff(
             doc_id,
             req.action_id,
             f"{req.action_id}-diff" if req.action_id else None,
+            thread_id=resolved_thread_id,
             action_type="translate",
             retry_action={
                 "type": "translate",
@@ -1031,6 +1181,7 @@ async def translate_diff(
             project_id,
             doc_id,
             f"{req.action_id}-diff" if req.action_id else None,
+            thread_id=resolved_thread_id,
             action_type="translate",
             diff={"explanation": str(exc), "changes": []},
             retry_action={
@@ -1053,6 +1204,7 @@ async def translate_diff(
         project_id,
         doc_id,
         f"{req.action_id}-diff" if req.action_id else None,
+        thread_id=resolved_thread_id,
         diff=result,
         action_type="translate",
         retry_action={
@@ -1081,12 +1233,14 @@ async def equation_diff(
     db: AsyncSession = Depends(get_db),
 ):
     await _require_document_edit_access(project_id, doc_id, current_user.id, db)
+    resolved_thread_id = _resolve_thread_id(doc_id, req.thread_id)
     await _persist_user_message(
         db,
         current_user.id,
         project_id,
         doc_id,
         req.action_id,
+        thread_id=resolved_thread_id,
         action_type="equation",
         action_prompt=req.description,
     )
@@ -1109,6 +1263,7 @@ async def equation_diff(
             doc_id,
             req.action_id,
             f"{req.action_id}-diff" if req.action_id else None,
+            thread_id=resolved_thread_id,
             action_type="equation",
             retry_action={
                 "type": "equation",
@@ -1125,6 +1280,7 @@ async def equation_diff(
             project_id,
             doc_id,
             f"{req.action_id}-diff" if req.action_id else None,
+            thread_id=resolved_thread_id,
             action_type="equation",
             diff={"explanation": str(exc), "changes": []},
             retry_action={
@@ -1144,6 +1300,7 @@ async def equation_diff(
         project_id,
         doc_id,
         f"{req.action_id}-diff" if req.action_id else None,
+        thread_id=resolved_thread_id,
         diff=result,
         action_type="equation",
         retry_action={
@@ -1158,8 +1315,8 @@ async def equation_diff(
     return {**result, "provider": provider, "model": model, "status": AI_STATUS_COMPLETED}
 
 
-@router.get("/projects/{project_id}/documents/{doc_id}/ai/messages", response_model=list[ChatHistoryMessageResponse])
-async def get_history(
+@router.get("/projects/{project_id}/documents/{doc_id}/ai/threads", response_model=list[ChatThreadSummaryResponse])
+async def get_threads(
     project_id: str,
     doc_id: str,
     current_user: User = Depends(get_current_user),
@@ -1174,12 +1331,38 @@ async def get_history(
         select(AIChatMessage, User.username)
         .join(User, AIChatMessage.user_id == User.id)
         .where(AIChatMessage.document_id == doc_id)
-        .order_by(AIChatMessage.created_at.asc())
+        .order_by(AIChatMessage.created_at.asc(), AIChatMessage.id.asc())
     )
+    return _build_thread_summaries(result.all(), doc_id)
+
+
+@router.get("/projects/{project_id}/documents/{doc_id}/ai/messages", response_model=list[ChatHistoryMessageResponse])
+async def get_history(
+    project_id: str,
+    doc_id: str,
+    thread_id: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await _purge_ai_history(db, doc_id=doc_id)
+    doc = await _require_document_access(project_id, doc_id, current_user.id, db)
+    if not doc:
+        return []
+
+    query = (
+        select(AIChatMessage, User.username)
+        .join(User, AIChatMessage.user_id == User.id)
+        .where(AIChatMessage.document_id == doc_id)
+    )
+    if thread_id:
+        query = query.where(AIChatMessage.thread_id == _resolve_thread_id(doc_id, thread_id))
+
+    result = await db.execute(query.order_by(AIChatMessage.created_at.asc(), AIChatMessage.id.asc()))
     rows = result.all()
     return [
         ChatHistoryMessageResponse(
             id=message.id,
+            thread_id=_resolve_thread_id(doc_id, message.thread_id),
             role=message.role,
             content=message.content,
             action_type=message.action_type,

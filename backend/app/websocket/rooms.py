@@ -11,6 +11,10 @@ from app.models.project import ProjectMember
 from app.services.ai_audit import AI_STATUS_SUBMITTED, infer_provider_model
 
 
+def _resolve_thread_id(doc_id: str, thread_id: str | None) -> str:
+    return (thread_id or "").strip() or doc_id
+
+
 async def handle_room(
     websocket: WebSocket,
     doc_id: str,
@@ -87,10 +91,12 @@ async def handle_room(
                     if action_id:
                         existing = await db.get(AIChatMessage, action_id)
                         provider, model = infer_provider_model(action_type=msg.get("action_type"))
+                        resolved_thread_id = _resolve_thread_id(doc.id, msg.get("thread_id"))
                         if not existing:
                             db.add(AIChatMessage(
                                 id=action_id,
                                 document_id=doc.id,
+                                thread_id=resolved_thread_id,
                                 user_id=user_id,
                                 role="user",
                                 content=msg.get("content", "") or "",
@@ -103,6 +109,8 @@ async def handle_room(
                             ))
                             await db.commit()
                         else:
+                            if not existing.thread_id:
+                                existing.thread_id = resolved_thread_id
                             if not existing.provider:
                                 existing.provider = provider
                             if not existing.model:

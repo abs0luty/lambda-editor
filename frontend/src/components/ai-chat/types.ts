@@ -44,6 +44,7 @@ export type ActionRequest =
 
 export interface ChatMessage {
   id: string
+  threadId?: string
   role: 'user' | 'assistant'
   content: string
   streaming?: boolean
@@ -64,6 +65,16 @@ export interface ChatMessage {
   model?: string
   status?: string
   error?: string
+}
+
+export interface ChatThreadSummary {
+  id: string
+  title: string
+  preview: string
+  messageCount: number
+  createdAt?: string
+  updatedAt?: string
+  localOnly?: boolean
 }
 
 export type ActionType = 'equation' | 'translate' | 'suggest' | 'simplify' | 'summarize'
