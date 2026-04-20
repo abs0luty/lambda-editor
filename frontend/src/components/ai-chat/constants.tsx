@@ -1,5 +1,5 @@
 import { RefreshCw, AlignLeft, Sparkles, Languages, Calculator } from 'lucide-react'
-import type { ActiveAction, ActionRequest, ActionType, ChatMessage } from './types'
+import type { ActiveAction, ActionRequest, ActionType, ChatMessage, ChatThreadSummary } from './types'
 
 export const ACTION_DEFS: Record<ActionType, Omit<ActiveAction, 'type'>> = {
   simplify: {
@@ -69,6 +69,7 @@ export const getActionPrompt = (request: ActionRequest, variationRequest = '') =
 
 export const mapStoredMessage = (message: any): ChatMessage => ({
   id: message.id,
+  threadId: message.thread_id || undefined,
   role: message.role,
   content: message.content || '',
   diff: message.diff || undefined,
@@ -85,4 +86,13 @@ export const mapStoredMessage = (message: any): ChatMessage => ({
   model: message.model || undefined,
   status: message.status || undefined,
   error: message.error || undefined,
+})
+
+export const mapStoredThread = (thread: any): ChatThreadSummary => ({
+  id: thread.id,
+  title: thread.title || 'New chat',
+  preview: thread.preview || 'Start a fresh conversation for this document.',
+  messageCount: Number(thread.message_count ?? 0),
+  createdAt: thread.created_at || undefined,
+  updatedAt: thread.updated_at || undefined,
 })

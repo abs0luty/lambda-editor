@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import {
   Bot, Loader2, RefreshCw, AlignLeft,
   X, FileText, MapPin,
-  ArrowRight, Square,
+  ArrowRight, Square, History, PlusSquare,
 } from 'lucide-react'
 import { aiChatApi, streamAI } from '../services/api'
 import api from '../services/api'
@@ -10,8 +10,8 @@ import { useStore } from '../store/useStore'
 import { RoomSocket } from '../services/socket'
 import { C } from '../design'
 import DiffView, { DiffChange } from './DiffView'
-import type { AIChatProps as Props, QuoteItem, EquationLocation, ActionRequest, ChatMessage, ActionType, ActiveAction } from './ai-chat/types'
-import { ACTION_DEFS, AVAILABLE_ACTIONS, genId, inferActionType, getActionPrompt, mapStoredMessage } from './ai-chat/constants'
+import type { AIChatProps as Props, QuoteItem, EquationLocation, ActionRequest, ChatMessage, ActionType, ActiveAction, ChatThreadSummary } from './ai-chat/types'
+import { ACTION_DEFS, AVAILABLE_ACTIONS, genId, inferActionType, getActionPrompt, mapStoredMessage, mapStoredThread } from './ai-chat/constants'
 import { chip, textareaStyle, closeBtnStyle, userBubble, actionBubble, botBubble, quoteBlockStyle } from './ai-chat/styles'
 import MarkdownMessage from './ai-chat/MarkdownMessage'
 
@@ -20,6 +20,42 @@ type ActiveRequestState = {
   responseId: string
   kind: 'assistant' | 'diff'
   retryRequest?: ActionRequest
+}
+
+const genThreadId = () => `thread-${genId()}`
+
+const createDraftThread = (threadId: string): ChatThreadSummary => {
+  const now = new Date().toISOString()
+  return {
+    id: threadId,
+    title: 'New chat',
+    preview: 'Start a fresh conversation for this document.',
+    messageCount: 0,
+    createdAt: now,
+    updatedAt: now,
+    localOnly: true,
+  }
+}
+
+const toTimestamp = (value?: string) => {
+  const parsed = value ? Date.parse(value) : NaN
+  return Number.isNaN(parsed) ? 0 : parsed
+}
+
+const sortThreads = (threads: ChatThreadSummary[]) => [...threads].sort((a, b) => (
+  toTimestamp(b.updatedAt ?? b.createdAt) - toTimestamp(a.updatedAt ?? a.createdAt)
+))
+
+const formatThreadTime = (value?: string) => {
+  if (!value) return ''
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return ''
+  return parsed.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
 }
 
 export default function AIChat({
@@ -41,6 +77,9 @@ export default function AIChat({
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [showHistory, setShowHistory] = useState(false)
+  const [threadSummaries, setThreadSummaries] = useState<ChatThreadSummary[]>([])
+  const [activeThreadId, setActiveThreadId] = useState('')
   const [activeAction, setActiveAction] = useState<ActiveAction | null>(null)
   const [equationLocation, setEquationLocation] = useState<EquationLocation | null>(null)
   const [retryAction, setRetryAction] = useState<ActionRequest | null>(null)
@@ -60,6 +99,8 @@ export default function AIChat({
   // AbortController for the active AI request so the user can stop generation consistently.
   const abortControllerRef = useRef<AbortController | null>(null)
   const activeRequestRef = useRef<ActiveRequestState | null>(null)
+  const activeThreadIdRef = useRef('')
+  const cancelEquationLocationRef = useRef(onCancelEquationLocation)
   const { currentDoc, user } = useStore()
   const effectiveEquationLocation = equationLocation ?? pendingEquationLocation ?? null
   const canReviewDiffs = !readOnly
@@ -68,9 +109,14 @@ export default function AIChat({
   // Read the latest socket inside callbacks without forcing every handler to resubscribe.
   const socketRef = useRef<RoomSocket | null>(null)
   useEffect(() => { socketRef.current = socket }, [socket])
+  useEffect(() => { activeThreadIdRef.current = activeThreadId }, [activeThreadId])
+  useEffect(() => { cancelEquationLocationRef.current = onCancelEquationLocation }, [onCancelEquationLocation])
 
   const broadcast = useCallback((data: Record<string, unknown>) => {
-    socketRef.current?.sendAiChat(data)
+    socketRef.current?.sendAiChat({
+      ...data,
+      thread_id: activeThreadIdRef.current,
+    })
   }, [])
 
   const clearActiveRequest = () => {
@@ -123,8 +169,72 @@ export default function AIChat({
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  const resetComposerState = useCallback(() => {
+    setInput('')
+    setQuotes([])
+    setRetryAction(null)
+    setActiveAction(null)
+    setEquationLocation(null)
+    cancelEquationLocationRef.current?.()
+  }, [])
+
+  const refreshThreadSummaries = useCallback(async () => {
+    if (!currentDoc?.id || !currentDoc.project_id) {
+      setThreadSummaries([])
+      return [] as ChatThreadSummary[]
+    }
+
+    const res = await aiChatApi.threads(currentDoc.project_id, currentDoc.id)
+    const serverThreads = (Array.isArray(res.data) ? res.data : []).map(mapStoredThread)
+    setThreadSummaries((prev) => {
+      const activeDraft = prev.find((thread) => (
+        thread.localOnly
+        && thread.id === activeThreadIdRef.current
+        && !serverThreads.some((serverThread) => serverThread.id === thread.id)
+      ))
+      return sortThreads(activeDraft ? [activeDraft, ...serverThreads] : serverThreads)
+    })
+    return serverThreads
+  }, [currentDoc?.id, currentDoc?.project_id])
+
   useEffect(() => {
     if (!currentDoc?.id || !currentDoc.project_id) {
+      setMessages([])
+      setThreadSummaries([])
+      setActiveThreadId('')
+      return
+    }
+
+    let cancelled = false
+    clearActiveRequest()
+    streamingMsgRef.current.clear()
+    actionRequestRef.current.clear()
+    setLoading(false)
+    setShowHistory(false)
+    setMessages([])
+    setAccepted(new Map())
+    setRejected(new Map())
+    resetComposerState()
+
+    const bootstrapThreads = async () => {
+      try {
+        const nextThreads = await refreshThreadSummaries()
+        if (cancelled) return
+        setActiveThreadId(nextThreads[0]?.id || genThreadId())
+      } catch {
+        if (!cancelled) {
+          setThreadSummaries([])
+          setActiveThreadId(genThreadId())
+        }
+      }
+    }
+
+    void bootstrapThreads()
+    return () => { cancelled = true }
+  }, [currentDoc?.id, currentDoc?.project_id, refreshThreadSummaries, resetComposerState])
+
+  useEffect(() => {
+    if (!currentDoc?.id || !currentDoc.project_id || !activeThreadId) {
       setMessages([])
       return
     }
@@ -137,7 +247,7 @@ export default function AIChat({
     setRejected(new Map())
     setRetryAction(null)
 
-    aiChatApi.history(currentDoc.project_id, currentDoc.id)
+    aiChatApi.history(currentDoc.project_id, currentDoc.id, activeThreadId)
       .then((res) => {
         if (cancelled) return
         const nextMessages = (Array.isArray(res.data) ? res.data : []).map(mapStoredMessage)
@@ -159,7 +269,7 @@ export default function AIChat({
       })
 
     return () => { cancelled = true }
-  }, [currentDoc?.id, currentDoc?.project_id])
+  }, [activeThreadId, currentDoc?.id, currentDoc?.project_id])
 
   // Rebuild remote chat activity locally so every collaborator sees the same AI timeline.
   useEffect(() => {
@@ -168,11 +278,22 @@ export default function AIChat({
       const event = msg.event as string
       const actionId = msg.action_id as string
       const fromUser = msg.username as string
+      const eventThreadId = typeof msg.thread_id === 'string' && msg.thread_id.trim()
+        ? msg.thread_id.trim()
+        : currentDoc?.id || ''
+
+      if (eventThreadId && activeThreadIdRef.current && eventThreadId !== activeThreadIdRef.current) {
+        if (event === 'user_msg' || event === 'done' || event === 'cancelled' || event === 'diff' || event === 'agent_result') {
+          void refreshThreadSummaries()
+        }
+        return
+      }
 
       if (event === 'user_msg') {
         const actionType = inferActionType(msg.action_type, msg.suggest_instruction, msg.action_label)
         setMessages((prev) => prev.some((m) => m.id === actionId) ? prev : [...prev, {
           id: actionId,
+          threadId: eventThreadId,
           role: 'user',
           content: msg.content || '',
           fromUser,
@@ -195,7 +316,7 @@ export default function AIChat({
           const msgId = `${actionId}-res`
           streamingMsgRef.current.set(actionId, msgId)
           setMessages((prev) => [...prev, {
-            id: msgId, role: 'assistant', content: chunk, streaming: true, fromUser,
+            id: msgId, threadId: eventThreadId, role: 'assistant', content: chunk, streaming: true, fromUser,
           }])
         }
 
@@ -239,6 +360,7 @@ export default function AIChat({
           if (responseKind === 'diff') {
             return [...prev, {
               id: responseId,
+              threadId: eventThreadId,
               role: 'assistant',
               content: '',
               streaming: false,
@@ -252,6 +374,7 @@ export default function AIChat({
 
           return [...prev, {
             id: responseId,
+            threadId: eventThreadId,
             role: 'assistant',
             content: cancellationMessage,
             streaming: false,
@@ -265,6 +388,7 @@ export default function AIChat({
         const retryRequest = (msg.action_request as ActionRequest | undefined) ?? actionRequestRef.current.get(actionId)
         setMessages((prev) => prev.some((m) => m.id === `${actionId}-diff`) ? prev : [...prev, {
           id: `${actionId}-diff`,
+          threadId: eventThreadId,
           role: 'assistant', content: '', streaming: false,
           diff: msg.diff,
           toolCalls: msg.tool_calls || msg.diff?.tool_calls || undefined,
@@ -279,6 +403,7 @@ export default function AIChat({
         const responseId = `${actionId}-res`
         const nextMessage: ChatMessage = {
           id: responseId,
+          threadId: eventThreadId,
           role: 'assistant',
           content: msg.content || '',
           sources: msg.sources || undefined,
@@ -299,15 +424,15 @@ export default function AIChat({
       }
     })
     return () => off()
-  }, [socket])
+  }, [currentDoc?.id, refreshThreadSummaries, socket])
 
   const addUserMsg = (msg: Omit<ChatMessage, 'id'>, id: string) => {
-    setMessages((prev) => [...prev, { ...msg, id }])
+    setMessages((prev) => [...prev, { ...msg, id, threadId: activeThreadIdRef.current }])
   }
 
   const startStreamingMsg = (id: string, firstChunk: string, meta?: Pick<ChatMessage, 'provider' | 'model' | 'status' | 'error'>) => {
     setMessages((prev) => [...prev, {
-      id, role: 'assistant', content: firstChunk, streaming: true, ...meta,
+      id, threadId: activeThreadIdRef.current, role: 'assistant', content: firstChunk, streaming: true, ...meta,
     }])
   }
 
@@ -332,7 +457,7 @@ export default function AIChat({
     meta?: Pick<ChatMessage, 'provider' | 'model' | 'status' | 'error'>,
   ) => {
     setMessages((prev) => [...prev, {
-      id, role: 'assistant', content: '', streaming: false, diff, retryAction: retryRequest, toolCalls, ...meta,
+      id, threadId: activeThreadIdRef.current, role: 'assistant', content: '', streaming: false, diff, retryAction: retryRequest, toolCalls, ...meta,
     }])
   }
 
@@ -345,6 +470,7 @@ export default function AIChat({
   ) => {
     setMessages((prev) => [...prev, {
       id,
+      threadId: activeThreadIdRef.current,
       role: 'assistant',
       content,
       streaming: false,
@@ -356,11 +482,12 @@ export default function AIChat({
 
   const upsertAssistantMsg = (message: ChatMessage) => {
     setMessages((prev) => {
+      const nextMessage = { ...message, threadId: message.threadId || activeThreadIdRef.current }
       const existing = prev.find((entry) => entry.id === message.id)
-      if (!existing) return [...prev, message]
+      if (!existing) return [...prev, nextMessage]
       return prev.map((entry) => (
         entry.id === message.id
-          ? { ...entry, ...message, streaming: false }
+          ? { ...entry, ...nextMessage, streaming: false }
           : entry
       ))
     })
@@ -393,6 +520,7 @@ export default function AIChat({
       if (kind === 'diff') {
         return [...prev, {
           id: responseId,
+          threadId: activeThreadIdRef.current,
           role: 'assistant',
           content: '',
           streaming: false,
@@ -405,6 +533,7 @@ export default function AIChat({
 
       return [...prev, {
         id: responseId,
+        threadId: activeThreadIdRef.current,
         role: 'assistant',
         content: cancellationMessage,
         streaming: false,
@@ -488,10 +617,30 @@ export default function AIChat({
     abortControllerRef.current = null
   }
 
+  const openThread = useCallback((threadId: string) => {
+    if (!threadId || loading) return
+    resetComposerState()
+    setAccepted(new Map())
+    setRejected(new Map())
+    setMessages([])
+    setShowHistory(false)
+    setActiveThreadId(threadId)
+  }, [loading, resetComposerState])
+
+  const startNewChat = useCallback(() => {
+    if (loading) return
+    const threadId = genThreadId()
+    setThreadSummaries((prev) => sortThreads([
+      createDraftThread(threadId),
+      ...prev.filter((thread) => !thread.localOnly && thread.id !== threadId),
+    ]))
+    openThread(threadId)
+  }, [loading, openThread])
+
   const hydrateAssistantMessage = useCallback(async (responseId: string) => {
-    if (!currentDoc?.project_id || !currentDoc?.id) return
+    if (!currentDoc?.project_id || !currentDoc?.id || !activeThreadIdRef.current) return
     try {
-      const res = await aiChatApi.history(currentDoc.project_id, currentDoc.id)
+      const res = await aiChatApi.history(currentDoc.project_id, currentDoc.id, activeThreadIdRef.current)
       const stored = (Array.isArray(res.data) ? res.data : []).find((message: any) => message.id === responseId)
       if (!stored) return
       const message = mapStoredMessage(stored)
@@ -553,6 +702,8 @@ export default function AIChat({
     if (retryAction) { await submitRetryAction(); return }
     const text = input.trim()
     if (!text && quotes.length === 0) return
+    const threadId = activeThreadIdRef.current
+    if (!threadId) return
 
     const currentQuotes = [...quotes]
     setInput('')
@@ -574,6 +725,7 @@ export default function AIChat({
         prompt: fullPrompt,
         document_context: currentDoc?.content ?? '',
         action_id: aid,
+        thread_id: threadId,
       },
       aid,
     )
@@ -581,9 +733,12 @@ export default function AIChat({
     if (outcome !== 'cancelled') {
       await hydrateAssistantMessage(responseId)
     }
+    await refreshThreadSummaries()
   }
 
   const runDiffAction = async (request: ActionRequest, currentQuotes: QuoteItem[], variationRequest = '') => {
+    const threadId = activeThreadIdRef.current
+    if (!threadId) return
     const aid = genId()
     const actionPrompt = getActionPrompt(request, variationRequest)
     addUserMsg({ role: 'user', content: '', quotes: currentQuotes, actionType: request.type, actionPrompt }, aid)
@@ -604,6 +759,7 @@ export default function AIChat({
           location: request.location,
           variation_request: variationRequest,
           action_id: aid,
+          thread_id: threadId,
         }, { signal: controller.signal })
       } else if (request.type === 'translate') {
         res = await api.post(`/projects/${currentDoc?.project_id}/documents/${currentDoc?.id}/ai/translation-suggestions`, {
@@ -612,6 +768,7 @@ export default function AIChat({
           document_content: currentDoc?.content || '',
           variation_request: variationRequest,
           action_id: aid,
+          thread_id: threadId,
         }, { signal: controller.signal })
       } else if (request.type === 'suggest') {
         res = await api.post(`/projects/${currentDoc?.project_id}/documents/${currentDoc?.id}/ai/change-suggestions`, {
@@ -619,6 +776,7 @@ export default function AIChat({
           document_content: currentDoc?.content || '',
           variation_request: variationRequest,
           action_id: aid,
+          thread_id: threadId,
         }, { signal: controller.signal })
       } else {
         res = await api.post(`/projects/${currentDoc?.project_id}/documents/${currentDoc?.id}/ai/rewrite-suggestions`, {
@@ -627,6 +785,7 @@ export default function AIChat({
           document_content: currentDoc?.content || '',
           variation_request: variationRequest,
           action_id: aid,
+          thread_id: threadId,
         }, { signal: controller.signal })
       }
       const toolCalls = Array.isArray(res.data.tool_calls) ? res.data.tool_calls : undefined
@@ -680,6 +839,7 @@ export default function AIChat({
     } finally {
       clearActiveRequest()
       setLoading(false)
+      await refreshThreadSummaries()
     }
   }
 
@@ -716,12 +876,17 @@ export default function AIChat({
       addUserMsg({ role: 'user', content: '', quotes: currentQuotes, actionType: 'summarize', actionPrompt }, aid)
       broadcast({ event: 'user_msg', action_type: 'summarize', action_prompt: actionPrompt, quotes: currentQuotes, action_id: aid })
       setLoading(true)
-      await runStream(`/projects/${currentDoc?.project_id}/documents/${currentDoc?.id}/ai/rewrites`, {
+      const outcome = await runStream(`/projects/${currentDoc?.project_id}/documents/${currentDoc?.id}/ai/rewrites`, {
         text,
         style: 'summarize',
         document_context: currentDoc?.content ?? '',
         action_id: aid,
+        thread_id: activeThreadIdRef.current,
       }, aid)
+      if (outcome !== 'cancelled') {
+        await hydrateAssistantMessage(`${aid}-res`)
+      }
+      await refreshThreadSummaries()
       return
     }
 
@@ -886,15 +1051,64 @@ export default function AIChat({
     persistReviewState(id, nextAccepted, nextRejected)
   }, [canReviewDiffs, persistReviewState])
 
+  const activeThreadSummary = threadSummaries.find((thread) => thread.id === activeThreadId)
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: C.bgSurface, fontFamily: 'system-ui, sans-serif' }}>
 
       <div style={{ padding: '8px 12px', background: C.bgRaised, borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
           <Bot size={15} color={C.accent} />
-          <span style={{ fontWeight: 700, fontSize: 13, color: C.textPrimary }}>AI Assistant</span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+            <span style={{ fontWeight: 700, fontSize: 13, color: C.textPrimary }}>AI Assistant</span>
+            <span style={{ fontSize: 10, color: C.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 220 }}>
+              {activeThreadSummary?.title || 'New chat'}
+            </span>
+          </div>
           {loading && <Loader2 size={12} color={C.accent} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />}
           <div style={{ flex: 1 }} />
+          <button
+            onClick={() => setShowHistory((prev) => !prev)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              background: showHistory ? C.accentSubtle : C.bgCard,
+              border: `1px solid ${showHistory ? C.accentBorder : C.border}`,
+              borderRadius: 6,
+              color: showHistory ? C.accent : C.textSecondary,
+              fontSize: 11,
+              fontWeight: 600,
+              padding: '4px 8px',
+              cursor: loading ? 'default' : 'pointer',
+              opacity: loading ? 0.5 : 1,
+            }}
+            disabled={loading}
+            title="View conversation history"
+          >
+            <History size={12} /> History
+          </button>
+          <button
+            onClick={startNewChat}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              background: C.bgCard,
+              border: `1px solid ${C.border}`,
+              borderRadius: 6,
+              color: C.textSecondary,
+              fontSize: 11,
+              fontWeight: 600,
+              padding: '4px 8px',
+              cursor: loading ? 'default' : 'pointer',
+              opacity: loading ? 0.5 : 1,
+            }}
+            disabled={loading}
+            title="Start a new chat thread"
+          >
+            <PlusSquare size={12} /> New chat
+          </button>
           {loading && (
             <button
               onClick={stopGeneration}
@@ -914,6 +1128,58 @@ export default function AIChat({
           )}
         </div>
       </div>
+
+      {showHistory && (
+        <div style={{ padding: '8px 10px', borderBottom: `1px solid ${C.border}`, background: C.bgCard, flexShrink: 0 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 200, overflowY: 'auto' }}>
+            {threadSummaries.length === 0 ? (
+              <div style={{ fontSize: 11, color: C.textMuted, padding: '6px 4px' }}>
+                No previous chats yet.
+              </div>
+            ) : (
+              threadSummaries.map((thread) => {
+                const active = thread.id === activeThreadId
+                return (
+                  <button
+                    key={thread.id}
+                    onClick={() => openThread(thread.id)}
+                    style={{
+                      textAlign: 'left',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 3,
+                      padding: '8px 10px',
+                      borderRadius: 8,
+                      border: `1px solid ${active ? C.accentBorder : C.border}`,
+                      background: active ? C.accentSubtle : C.bgRaised,
+                      cursor: loading ? 'default' : 'pointer',
+                      opacity: loading ? 0.5 : 1,
+                    }}
+                    disabled={loading}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: active ? C.accent : C.textPrimary, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                        {thread.title}
+                      </span>
+                      <span style={{ fontSize: 10, color: C.textMuted, flexShrink: 0 }}>
+                        {formatThreadTime(thread.updatedAt || thread.createdAt)}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 11, color: C.textSecondary, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                        {thread.preview}
+                      </span>
+                      <span style={{ fontSize: 10, color: C.textMuted, flexShrink: 0 }}>
+                        {thread.messageCount} msg{thread.messageCount === 1 ? '' : 's'}
+                      </span>
+                    </div>
+                  </button>
+                )
+              })
+            )}
+          </div>
+        </div>
+      )}
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, padding: '7px 10px', borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
         {AVAILABLE_ACTIONS.map((type) => {

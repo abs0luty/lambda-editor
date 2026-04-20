@@ -226,6 +226,72 @@ async def test_ai_diff_history_and_review_state_are_persisted(client_factory, mo
     assert viewer_response.status_code == 403
 
 
+async def test_ai_history_supports_threads_and_thread_summaries(client, monkeypatch):
+    await _register(client, "thread-owner@example.com", "thread-owner")
+    project = await _create_project(client, "AI Threads")
+
+    async def fake_suggest_changes(instruction: str, document_content: str, variation_request: str = ""):
+        return {
+            "explanation": f"Suggestion for {instruction}",
+            "changes": [
+                {
+                    "id": f"change-{instruction}",
+                    "description": f"Rewrite for {instruction}",
+                    "old_text": "Introduction",
+                    "new_text": instruction,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(ai_service, "suggest_changes", fake_suggest_changes)
+
+    doc_response = await client.get(f"/projects/{project['id']}/documents/{project['main_doc_id']}")
+    assert doc_response.status_code == 200
+    content = doc_response.json()["content"]
+
+    first_thread_response = await client.post(
+        f"/projects/{project['id']}/documents/{project['main_doc_id']}/ai/change-suggestions",
+        json={
+            "instruction": "Thread one",
+            "document_content": content,
+            "action_id": "act-thread-1",
+            "thread_id": "thread-1",
+        },
+    )
+    assert first_thread_response.status_code == 200
+
+    second_thread_response = await client.post(
+        f"/projects/{project['id']}/documents/{project['main_doc_id']}/ai/change-suggestions",
+        json={
+            "instruction": "Thread two",
+            "document_content": content,
+            "action_id": "act-thread-2",
+            "thread_id": "thread-2",
+        },
+    )
+    assert second_thread_response.status_code == 200
+
+    filtered_history_response = await client.get(
+        f"/projects/{project['id']}/documents/{project['main_doc_id']}/ai/messages",
+        params={"thread_id": "thread-1"},
+    )
+    assert filtered_history_response.status_code == 200
+    filtered_history = filtered_history_response.json()
+    assert len(filtered_history) == 2
+    assert {message["thread_id"] for message in filtered_history} == {"thread-1"}
+    assert {message["id"] for message in filtered_history} == {"act-thread-1", "act-thread-1-diff"}
+
+    threads_response = await client.get(
+        f"/projects/{project['id']}/documents/{project['main_doc_id']}/ai/threads"
+    )
+    assert threads_response.status_code == 200
+    summaries = threads_response.json()
+    assert [summary["id"] for summary in summaries] == ["thread-2", "thread-1"]
+    assert summaries[0]["title"] == "Thread two"
+    assert summaries[0]["preview"] == "Suggestion for Thread two"
+    assert summaries[0]["message_count"] == 2
+
+
 async def _drain(response) -> str:
     body = ""
     async for piece in response.body_iterator:
@@ -496,6 +562,126 @@ async def test_failed_ai_diff_is_persisted_with_error_metadata(client, monkeypat
     }
     assert failed_message["diff"]["changes"] == []
     assert failed_message["diff"]["explanation"] == "LLM temporarily unavailable"
+
+
+async def test_translation_diff_falls_back_to_llm_when_google_translate_is_not_configured(client, monkeypatch):
+    await _register(client, "owner-translate-ok@example.com", "owner-translate-ok")
+    project = await _create_project(client, "Translate Fallback")
+
+    monkeypatch.setattr(settings, "GOOGLE_TRANSLATE_API_KEY", "")
+
+    async def fake_responses_create(payload: dict):
+        assert payload["model"] == settings.llm_model
+        text = payload["input"][0]["content"][0]["text"]
+        assert "Translate the following text to Spanish (es)." in text
+        assert "Introduction" in text
+        return {
+            "output": [
+                {
+                    "content": [
+                        {"type": "output_text", "text": "Introduccion"}
+                    ]
+                }
+            ]
+        }
+
+    monkeypatch.setattr(agent_service, "_responses_create", fake_responses_create)
+
+    doc_response = await client.get(f"/projects/{project['id']}/documents/{project['main_doc_id']}")
+    assert doc_response.status_code == 200
+
+    diff_response = await client.post(
+        f"/projects/{project['id']}/documents/{project['main_doc_id']}/ai/translation-suggestions",
+        json={
+            "language": "Spanish",
+            "text": "Introduction",
+            "document_content": doc_response.json()["content"],
+            "action_id": "act-translate-ok",
+        },
+    )
+    assert diff_response.status_code == 200
+    payload = diff_response.json()
+    assert payload["changes"][0]["new_text"] == "Introduccion"
+    assert payload["provider"] == settings.llm_provider
+    assert payload["model"] == settings.llm_model
+    assert payload["status"] == "completed"
+
+    history_response = await client.get(
+        f"/projects/{project['id']}/documents/{project['main_doc_id']}/ai/messages"
+    )
+    assert history_response.status_code == 200
+    history = history_response.json()
+    assert len(history) == 2
+
+    history_by_id = {message["id"]: message for message in history}
+    assert history_by_id["act-translate-ok"]["provider"] == settings.llm_provider
+    assert history_by_id["act-translate-ok"]["model"] == settings.llm_model
+
+    assistant_message = history_by_id["act-translate-ok-diff"]
+    assert assistant_message["status"] == "completed"
+    assert assistant_message["provider"] == settings.llm_provider
+    assert assistant_message["model"] == settings.llm_model
+    assert assistant_message["diff"]["changes"][0]["new_text"] == "Introduccion"
+
+
+async def test_failed_translation_diff_is_persisted_when_translate_provider_is_not_configured(client, monkeypatch):
+    await _register(client, "owner-translate@example.com", "owner-translate")
+    project = await _create_project(client, "Translate Failure")
+
+    monkeypatch.setattr(settings, "GOOGLE_TRANSLATE_API_KEY", "")
+
+    async def failing_translate_diff(language: str, text: str, document_content: str, variation_request: str = ""):
+        return {
+            "explanation": "GOOGLE_TRANSLATE_API_KEY is not configured.",
+            "changes": [],
+            "tool_calls": ["translate_text"],
+            "error": "GOOGLE_TRANSLATE_API_KEY is not configured.",
+        }
+
+    monkeypatch.setattr(agent_service, "translate_diff_with_tool", failing_translate_diff)
+
+    doc_response = await client.get(f"/projects/{project['id']}/documents/{project['main_doc_id']}")
+    assert doc_response.status_code == 200
+
+    diff_response = await client.post(
+        f"/projects/{project['id']}/documents/{project['main_doc_id']}/ai/translation-suggestions",
+        json={
+            "language": "Spanish",
+            "text": "Introduction",
+            "document_content": doc_response.json()["content"],
+            "action_id": "act-translate-fail",
+        },
+    )
+    assert diff_response.status_code == 503
+    assert diff_response.json()["detail"] == "GOOGLE_TRANSLATE_API_KEY is not configured."
+
+    history_response = await client.get(
+        f"/projects/{project['id']}/documents/{project['main_doc_id']}/ai/messages"
+    )
+    assert history_response.status_code == 200
+    history = history_response.json()
+    assert len(history) == 2
+
+    history_by_id = {message["id"]: message for message in history}
+    assert history_by_id["act-translate-fail"]["role"] == "user"
+    assert history_by_id["act-translate-fail"]["status"] == "submitted"
+    assert history_by_id["act-translate-fail"]["provider"] == settings.llm_provider
+    assert history_by_id["act-translate-fail"]["model"] == settings.llm_model
+
+    failed_message = history_by_id["act-translate-fail-diff"]
+    assert failed_message["role"] == "assistant"
+    assert failed_message["status"] == "failed"
+    assert failed_message["error"] == "GOOGLE_TRANSLATE_API_KEY is not configured."
+    assert failed_message["provider"] == settings.llm_provider
+    assert failed_message["model"] == settings.llm_model
+    assert failed_message["retry_action"] == {
+        "type": "translate",
+        "language": "Spanish",
+        "text": "Introduction",
+        "tool_calls": ["translate_text"],
+    }
+    assert failed_message["diff"]["changes"] == []
+    assert failed_message["diff"]["explanation"] == "GOOGLE_TRANSLATE_API_KEY is not configured."
 
 
 async def test_cancelled_ai_diff_is_persisted_with_cancelled_status(client, monkeypatch):

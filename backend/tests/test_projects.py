@@ -46,6 +46,7 @@ async def test_delete_project_cascades_ai_chat_history(client):
     async with AsyncSessionLocal() as db:
         db.add(AIChatMessage(
             document_id=project["main_doc_id"],
+            thread_id=project["main_doc_id"],
             user_id=user["id"],
             role="assistant",
             content="hello",

@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => ({
+  threads: vi.fn(),
   history: vi.fn(),
   updateReviewState: vi.fn(),
   agent: vi.fn(),
@@ -14,6 +15,7 @@ vi.mock("../services/api", () => ({
     post: apiMocks.post,
   },
   aiChatApi: {
+    threads: apiMocks.threads,
     history: apiMocks.history,
     updateReviewState: apiMocks.updateReviewState,
     agent: apiMocks.agent,
@@ -59,6 +61,17 @@ describe("AIChat cancellation", () => {
     resetStore();
     localStorage.clear();
     localStorage.setItem("ai-disclosure-accepted:v2", "true");
+    apiMocks.threads.mockResolvedValue({
+      data: [
+        {
+          id: "thread-1",
+          title: "Recent chat",
+          preview: "Previous conversation",
+          message_count: 2,
+          updated_at: "2026-04-20T10:00:00Z",
+        },
+      ],
+    });
     apiMocks.history.mockResolvedValue({ data: [] });
     apiMocks.updateReviewState.mockResolvedValue({ data: { ok: true } });
     apiMocks.agent.mockResolvedValue({ data: { content: "", status: "completed" } });
@@ -87,7 +100,8 @@ describe("AIChat cancellation", () => {
     render(<AIChat socket={null} readOnly={false} currentDocTitle="main.tex" />);
 
     await waitFor(() => {
-      expect(apiMocks.history).toHaveBeenCalledWith("proj-1", "doc-1");
+      expect(apiMocks.threads).toHaveBeenCalledWith("proj-1", "doc-1");
+      expect(apiMocks.history).toHaveBeenCalledWith("proj-1", "doc-1", "thread-1");
     });
 
     fireEvent.click(screen.getByRole("button", { name: /ai edit/i }));
@@ -148,7 +162,7 @@ describe("AIChat cancellation", () => {
       ],
     });
 
-    render(<AIChat socket={null} ydoc={ydoc as any} readOnly={false} currentDocTitle="main.tex" />);
+      render(<AIChat socket={null} ydoc={ydoc as any} readOnly={false} currentDocTitle="main.tex" />);
 
     expect(await screen.findByText(/document changed after this suggestion was generated/i)).toBeInTheDocument();
     expect(screen.queryByTitle("Accept")).not.toBeInTheDocument();
@@ -204,7 +218,7 @@ describe("AIChat cancellation", () => {
       render(<AIChat socket={null} readOnly={false} currentDocTitle="main.tex" />);
 
       await waitFor(() => {
-        expect(apiMocks.history).toHaveBeenCalledWith("proj-1", "doc-1");
+        expect(apiMocks.history).toHaveBeenCalledWith("proj-1", "doc-1", "thread-1");
       });
 
       const textarea = screen.getByPlaceholderText("Message…");
@@ -226,5 +240,53 @@ describe("AIChat cancellation", () => {
       nowSpy.mockRestore();
       randomSpy.mockRestore();
     }
+  });
+
+  it("starts a real new chat thread and shows thread history", async () => {
+    apiMocks.history.mockResolvedValue({ data: [] });
+
+    const { rerender } = render(
+      <AIChat
+        socket={null}
+        readOnly={false}
+        currentDocTitle="main.tex"
+        onCancelEquationLocation={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.history).toHaveBeenCalledWith("proj-1", "doc-1", "thread-1");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /history/i }));
+    expect(screen.getAllByText("Recent chat").length).toBeGreaterThan(0);
+    expect(screen.getByText("Previous conversation")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /new chat/i }));
+
+    await waitFor(() => {
+      expect(apiMocks.history).toHaveBeenLastCalledWith(
+        "proj-1",
+        "doc-1",
+        expect.stringMatching(/^thread-/),
+      );
+    });
+    const latestThreadId = apiMocks.history.mock.calls[apiMocks.history.mock.calls.length - 1]?.[2];
+    expect(latestThreadId).not.toBe("thread-1");
+
+    rerender(
+      <AIChat
+        socket={null}
+        readOnly={false}
+        currentDocTitle="main.tex"
+        onCancelEquationLocation={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.history.mock.calls[apiMocks.history.mock.calls.length - 1]?.[2]).toBe(latestThreadId);
+    });
+
+    expect(screen.getAllByText("New chat").length).toBeGreaterThan(0);
   });
 });

@@ -43,6 +43,7 @@ def _ensure_ai_chat_message_columns(sync_conn) -> None:
 
     columns = {column["name"] for column in inspector.get_columns("ai_chat_messages")}
     additions = {
+        "thread_id": "VARCHAR",
         "provider": "VARCHAR",
         "model": "VARCHAR",
         "status": "VARCHAR",
@@ -55,6 +56,18 @@ def _ensure_ai_chat_message_columns(sync_conn) -> None:
                 f"ALTER TABLE ai_chat_messages ADD COLUMN {column_name} {sql_type}"
             )
             columns.add(column_name)
+
+    if "thread_id" in columns:
+        sync_conn.exec_driver_sql(
+            """
+            UPDATE ai_chat_messages
+            SET thread_id = document_id
+            WHERE thread_id IS NULL OR thread_id = ''
+            """
+        )
+        sync_conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_ai_chat_messages_thread_id ON ai_chat_messages (thread_id)"
+        )
 
     if "status" in columns:
         sync_conn.exec_driver_sql(

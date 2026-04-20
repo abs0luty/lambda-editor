@@ -159,9 +159,14 @@ export const aiChatApi = {
     prompt: string
     document_context?: string
     action_id?: string
+    thread_id?: string
   }, signal?: AbortSignal) => api.post(`/projects/${projectId}/documents/${docId}/ai/messages`, payload, { signal }),
-  history: (projectId: string, docId: string) =>
-    api.get(`/projects/${projectId}/documents/${docId}/ai/messages`),
+  threads: (projectId: string, docId: string) =>
+    api.get(`/projects/${projectId}/documents/${docId}/ai/threads`),
+  history: (projectId: string, docId: string, threadId?: string) =>
+    api.get(`/projects/${projectId}/documents/${docId}/ai/messages`, {
+      params: threadId ? { thread_id: threadId } : undefined,
+    }),
   updateReviewState: (projectId: string, docId: string, messageId: string, accepted: string[], rejected: string[]) =>
     api.patch(`/projects/${projectId}/documents/${docId}/ai/messages/${messageId}`, { accepted, rejected }),
 }
